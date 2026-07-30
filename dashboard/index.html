@@ -16,7 +16,7 @@
 
     <div class="field">
       <button type="button" class="shortcut-btn refresh-btn" id="refreshDataBtn" disabled>⟳ 데이터 최신화</button>
-      <p class="field-hint">시트에서 최신 데이터를 다시 불러옵니다 (이 화면 세션에만 반영되고, 로컬 data.json 파일은 바꾸지 않습니다).</p>
+      <p class="field-hint warning">⚠ 분석 전에 <b>꼭 먼저 눌러주세요</b> — 안 누르면 예전 데이터로 분석됩니다. (이 화면 세션에만 반영되고, 로컬 data.json 파일은 바꾸지 않습니다)</p>
     </div>
 
     <div class="field">
@@ -78,7 +78,6 @@
       </div>
     </details>
 
-    <p class="rail-note">data.json은 시트 스냅샷입니다. 시트가 갱신되면 <code>python scripts/export_agg.py</code>를 다시 실행해야 반영됩니다.</p>
   </aside>
 
   <main class="main">
