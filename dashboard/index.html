@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아모레몰 주간 광고성과 대시보드</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <span class="eyebrow">Amoremall · Weekly Ads</span>
+      <h1>주간 광고성과 대시보드</h1>
+    </div>
+
+    <div class="field">
+      <button type="button" class="shortcut-btn refresh-btn" id="refreshDataBtn" disabled>⟳ 데이터 최신화</button>
+      <p class="field-hint">시트에서 최신 데이터를 다시 불러옵니다 (이 화면 세션에만 반영되고, 로컬 data.json 파일은 바꾸지 않습니다).</p>
+    </div>
+
+    <div class="field">
+      <label><span class="step-num">1</span>분석 탭 선택 <span class="optional-tag">(Ctrl/Cmd+클릭으로 다중 선택)</span></label>
+      <select id="tabSelect" multiple size="3"></select>
+      <p class="field-hint">여러 탭(월)을 함께 선택하면, 월 경계를 넘는 기간도 하나의 데이터 풀로 합쳐서 비교할 수 있습니다.</p>
+    </div>
+
+    <div class="field">
+      <label><span class="step-num">2</span>비교할 기간 선택</label>
+      <div class="date-range-row">
+        <div class="period-tag">A(기준)</div>
+        <div class="date-range-inputs">
+          <input type="date" id="dateAStart" aria-label="A기간 시작일">
+          <span class="arrow">~</span>
+          <input type="date" id="dateAEnd" aria-label="A기간 종료일">
+        </div>
+      </div>
+      <div class="date-range-row">
+        <div class="period-tag">B(비교)</div>
+        <div class="date-range-inputs">
+          <input type="date" id="dateBStart" aria-label="B기간 시작일">
+          <span class="arrow">~</span>
+          <input type="date" id="dateBEnd" aria-label="B기간 종료일">
+        </div>
+      </div>
+      <div class="date-shortcuts">
+        <button type="button" class="shortcut-btn" id="shortcutRecent">최근 7일 vs 이전 7일</button>
+      </div>
+      <p id="dateOverlapWarning" class="field-hint warning" style="display:none;">⚠ A기간과 B기간이 겹칩니다.</p>
+    </div>
+
+    <div class="field">
+      <label>이번 기간 특이사항 메모 <span class="optional-tag">(선택)</span></label>
+      <textarea id="weekNote" rows="3" placeholder="예: 서버 장애로 7/15 오전 트래픽 유실, 아모레위크 기획전 조기 종료 등"></textarea>
+      <p class="field-hint">B기간별로 자동 저장됩니다. 메모를 반영해 다시 분석하려면 "분석 시작"을 다시 누르세요.</p>
+    </div>
+
+    <button class="run-btn" id="runBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">3</span>분석 시작</button>
+
+    <div class="rail-actions">
+      <button class="copy-btn" id="copyBtn" disabled>코멘트 복사</button>
+      <button class="copy-btn" id="qaToggleBtn" disabled>AI에게 질문하기</button>
+    </div>
+
+    <details class="pipeline">
+      <summary>이 대시보드는 어떻게 만들어지나요?</summary>
+      <ol>
+        <li><b>원본 데이터</b> — Google Sheets를 서비스 계정(읽기 전용)으로 직접 조회합니다.</li>
+        <li><b>집계</b> — <code>scripts/export_agg.py</code>가 시트 원본을 일(day) × 채널 × 목표 × 기획전 × 소재 단위로 합산해 <code>data.json</code>으로 저장합니다.</li>
+        <li><b>수치 계산</b> — 이 페이지(<code>app.js</code>)가 <code>data.json</code>을 불러와, 선택한 탭들의 데이터를 합친 뒤 A/B 기간(자유 선택한 날짜 범위)에 맞게 다시 합산하고 ROAS/CPI 증감, 기획전 랭킹, 비중(%)을 브라우저에서 전부 계산합니다.</li>
+        <li><b>AI 코멘트</b> — 계산된 수치 + 특이사항 메모를 <code>/api/comment</code>(Vercel 서버리스 함수)로 보내고, 그 함수가 Gemini API를 호출해 사람이 분석한 것 같은 코멘트를 받아옵니다. API 키는 서버 환경변수에만 있고 브라우저에는 노출되지 않습니다. 매출_KPF 상세성과만은 예외로, AI 없이 규칙 기반으로 그대로 계산됩니다.</li>
+      </ol>
+      <div class="cols">
+        노출 G · 클릭 H · 조회수 K · 광고비(Gross) AK<br>
+        구매수 AI · 매출(GMV) AJ · 앱설치 W(Airbridge)<br>
+        첫구매 BC · 회원가입 BH<br>
+        기획전 라벨 AE · 브랜드 AF · 기획전명 AG · 소재명 AW
+      </div>
+    </details>
+
+    <p class="rail-note">data.json은 시트 스냅샷입니다. 시트가 갱신되면 <code>python scripts/export_agg.py</code>를 다시 실행해야 반영됩니다.</p>
+  </aside>
+
+  <main class="main">
+    <div id="idleState" class="idle">
+      <h2>주차별 광고성과 코멘트 생성</h2>
+      <p>왼쪽에서 탭(들)과 A/B 비교 기간(날짜 범위)을 고른 뒤 분석을 시작하면, 우수 기획전 랭킹과 매출·신규가입·앱설치·트래픽 목표별 A 대비 B 성과 코멘트를 자동 생성합니다.</p>
+      <ol class="steps">
+        <li><span class="n">1</span><div><b>분석 탭 선택</b><span>여러 탭을 함께 선택하면 월 경계를 넘는 기간도 비교할 수 있습니다</span></div></li>
+        <li><span class="n">2</span><div><b>A기간 / B기간 선택</b><span>A가 기준(비교 대상 이전), B가 비교 대상(최근)입니다</span></div></li>
+        <li><span class="n">3</span><div><b>분석 시작 클릭</b><span>우수 기획전 TOP5와 목표별 매출·ROAS·첫구매·회원가입 변화가 생성됩니다</span></div></li>
+      </ol>
+    </div>
+
+    <div id="errorState" class="error-box" style="display:none;">
+      <h2>data.json을 불러오지 못했습니다</h2>
+      <p>이 페이지는 <code>fetch()</code>로 같은 폴더의 <code>data.json</code>을 읽습니다. 파일을 더블클릭해 여는 <code>file://</code> 방식으로는 브라우저가 fetch를 막을 수 있습니다. AI 코멘트(<code>/api/comment</code>)까지 로컬에서 테스트하려면 <code>vercel dev</code>로 실행해주세요 — <code>npx serve</code>는 정적 파일만 서빙해서 API 라우트가 동작하지 않습니다. (Vercel에 배포하면 둘 다 문제 없이 동작합니다.)</p>
+      <p class="msg"></p>
+    </div>
+
+    <div id="reportState" style="display:none;">
+      <div class="report-head">
+        <div class="compare-strip">
+          <span class="pill" id="labelA"></span>
+          <span class="arrow">→</span>
+          <span class="pill" id="labelB"></span>
+        </div>
+      </div>
+      <div id="sections"></div>
+    </div>
+  </main>
+
+  <aside id="qaPanel" class="qa-panel">
+    <div class="qa-panel-head">
+      <h3>AI에게 질문하기</h3>
+      <button type="button" id="qaCloseBtn" class="qa-close-btn" aria-label="닫기">✕</button>
+    </div>
+    <p class="qa-panel-hint">현재 로드된 탭·A/B 기간의 원본 데이터를 근거로 답합니다. 데이터에 없는 내용은 "모릅니다"라고 답할 수 있습니다.</p>
+    <div id="qaHistory" class="qa-history"></div>
+    <form id="qaForm" class="qa-form">
+      <textarea id="qaInput" rows="2" placeholder="예: 이번주 매출이 가장 많이 빠진 기획전이 뭐야?"></textarea>
+      <button type="submit" id="qaSendBtn" class="qa-send-btn">전송</button>
+    </form>
+  </aside>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

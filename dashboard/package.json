@@ -1,0 +1,10 @@
+{
+  "name": "amoremall-weekly-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Static weekly ads dashboard + a Vercel serverless function that turns computed metrics into an AI-written comment.",
+  "dependencies": {
+    "@google/genai": "^2.13.0",
+    "google-auth-library": "^10.9.1"
+  }
+}
