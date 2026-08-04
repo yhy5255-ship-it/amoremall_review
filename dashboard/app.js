@@ -981,6 +981,17 @@
     tabSelect.size = Math.max(1, Math.min(tabs.length, 5));
   }
 
+  // Native <select multiple> normally needs Ctrl/Cmd+click to toggle an option
+  // without collapsing the rest of the selection - intercepting mousedown and
+  // flipping `selected` manually makes a plain click toggle instead, which is
+  // the point of a checkbox-like multi-select but keeps the compact dropdown UI.
+  tabSelect.addEventListener("mousedown", (e) => {
+    if (e.target.tagName !== "OPTION") return;
+    e.preventDefault();
+    e.target.selected = !e.target.selected;
+    tabSelect.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
   // Recomputes the merged multi-tab pool whenever the checked tabs change, then
   // constrains the four date inputs to the merged range and (on first load, or when
   // the previous selection falls outside the new range) picks a sensible default:
