@@ -95,6 +95,8 @@ select:focus, input:focus, textarea:focus, button:focus-visible{
 .adv summary{cursor:pointer; font-size:12.5px; color:var(--ink-soft); font-weight:600;}
 .checkrow{display:flex; align-items:center; gap:8px; font-size:13px;}
 .checkrow input{accent-color:var(--accent);}
+.slack-notify-status{font-size:11px; color:var(--ink-soft); margin-left:auto;}
+.slack-notify-status.error{color:var(--bad);}
 
 .run-btn{
   margin-top:4px; background:var(--accent); color:#fff; border:none; border-radius:8px;

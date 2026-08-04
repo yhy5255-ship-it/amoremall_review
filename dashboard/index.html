@@ -57,6 +57,12 @@
 
     <button class="run-btn" id="runBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">3</span>분석 시작</button>
 
+    <label class="checkrow">
+      <input type="checkbox" id="slackNotifyCheckbox">
+      완료 시 Slack 알림 받기
+      <span id="slackNotifyStatus" class="slack-notify-status"></span>
+    </label>
+
     <div class="rail-actions">
       <button class="copy-btn" id="copyBtn" disabled>코멘트 복사</button>
       <button class="copy-btn" id="qaToggleBtn" disabled>AI에게 질문하기</button>

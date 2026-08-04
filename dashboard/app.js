@@ -849,8 +849,36 @@
         }
       }
       renderComments(json);
+      notifySlackIfEnabled();
     } catch (err) {
       renderCommentsError(err);
+    }
+  }
+
+  // "완료 시 Slack 알림 받기" - fires once the report comment successfully renders (not
+  // on failure, since there's nothing useful to report yet). Reuses commentsToPlainText()
+  // so the Slack message matches the "코멘트 복사" button byte-for-byte.
+  async function notifySlackIfEnabled() {
+    const checkbox = document.getElementById("slackNotifyCheckbox");
+    const status = document.getElementById("slackNotifyStatus");
+    if (!checkbox || !checkbox.checked) return;
+    const text = commentsToPlainText();
+    if (!text.trim()) return; // nothing to send (e.g. comment fetch itself failed)
+    status.textContent = "전송 중...";
+    status.classList.remove("error");
+    try {
+      const res = await fetch("/api/notify-slack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      status.textContent = "전송됨";
+    } catch (err) {
+      status.textContent = "전송 실패";
+      status.classList.add("error");
+      status.title = String((err && err.message) || err);
     }
   }
 
@@ -1286,6 +1314,13 @@
     });
     refreshDataBtn.addEventListener("click", refreshData);
     refreshDataBtn.disabled = false;
+
+    const slackNotifyCheckbox = document.getElementById("slackNotifyCheckbox");
+    slackNotifyCheckbox.checked = localStorage.getItem("slackNotifyEnabled") === "1";
+    slackNotifyCheckbox.addEventListener("change", () => {
+      localStorage.setItem("slackNotifyEnabled", slackNotifyCheckbox.checked ? "1" : "0");
+      document.getElementById("slackNotifyStatus").textContent = "";
+    });
     if (weekNoteEl) {
       let saveTimer = null;
       weekNoteEl.addEventListener("input", () => {
