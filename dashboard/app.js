@@ -928,10 +928,35 @@
     return out;
   }
 
+  // "summary" is a per-brand-per-promo breakdown (many rows) - asking the model to
+  // mentally add up dozens of those rows to answer an aggregate question ("총 첫구매
+  // 몇 건이야") is exactly the kind of arithmetic LLMs get wrong (observed live: it
+  // answered a totals question with numbers that don't match any real slice of the
+  // data). Pre-computing the per-goal-per-period totals here means the answer to any
+  // "총/전체/합계" question is a lookup, not mental math over a long list.
+  function computeQaTotals(scopedGroups, goals) {
+    const totals = {};
+    for (const goal of goals) {
+      const periodA = scopedGroups.filter(g => g.goal === goal && g.period === "A");
+      const periodB = scopedGroups.filter(g => g.goal === goal && g.period === "B");
+      totals[goal] = {
+        spendA: sum(periodA, "spend"), spendB: sum(periodB, "spend"),
+        gmvA: sum(periodA, "gmv"), gmvB: sum(periodB, "gmv"),
+        firstPurchaseA: sum(periodA, "firstPurchase"), firstPurchaseB: sum(periodB, "firstPurchase"),
+        signupA: sum(periodA, "signup"), signupB: sum(periodB, "signup"),
+        installA: sum(periodA, "install"), installB: sum(periodB, "install"),
+      };
+    }
+    return totals;
+  }
+
   function buildQaScopedData(question) {
     const { goals, wantsMaterial, wantsMediaDetail } = detectQaScope(question, qaContext.groups);
     const scopedGroups = qaContext.groups.filter(g => goals.includes(g.goal));
-    const data = { summary: qaGroupByPeriodPromo(scopedGroups).map(trimForGoal) };
+    const data = {
+      totals: computeQaTotals(scopedGroups, goals),
+      summary: qaGroupByPeriodPromo(scopedGroups).map(trimForGoal),
+    };
     if (wantsMediaDetail) data.detailGroups = scopedGroups.map(trimForGoal);
     if (wantsMaterial) data.promoGroups = qaContext.promoGroups.filter(p => goals.includes(p.goal));
     return data;

@@ -71,9 +71,10 @@ const SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅 데이터�
 5. 숫자를 언급할 때 ROAS·%p는 정수로, 그 외 비율(%)은 소수점 둘째 자리까지로 표현하세요.
 6. 답변은 실무자에게 말하듯 자연스러운 대화체 문단으로, 불필요하게 길게 늘이지 말고 핵심만 2~6문장으로 답하세요.
 7. 질문이 여러 기획전/매체/브랜드를 비교하는 성격이면(예: "TOP 3 알려줘", "A랑 B 비교해줘"), 그 근거가 된 수치를 "table"에 표 형태로 함께 정리하세요. 단일 값 질문이거나 표로 정리할 게 없으면 "table"은 반드시 null로 두세요 - table이 없다고 답변이 실패한 게 아니니 answer는 항상 정상적으로 채우세요. 표는 한 번에 20행을 넘기지 마세요(넘으면 상위 20개만). table의 열/값에 들어가는 기획전명·브랜드명·매체명도 원칙 0과 동일하게 데이터에 있는 문자열 그대로 사용하세요.
+8. "총/전체/합계/몇 건" 같이 특정 목표(goal)의 전체 합계를 묻는 질문에는 반드시 "totals" 필드의 값을 그대로 인용하세요 - "summary"에 있는 개별 기획전 행들을 직접 더해서 답하지 마세요. summary는 기획전이 여러 개로 쪼개져 있어 직접 암산으로 합산하면 틀리기 쉽습니다. totals에 없는 조합(예: 여러 목표를 합친 합계)을 물어보면, 있는 것끼리만 각각 answer하거나 "모릅니다"라고 답하세요 - 임의로 새로 더하지 마세요.
 
 ## 데이터 안내
-"summary"는 비교 기간(A/B) × 브랜드 × 기획전 단위로 집계된 핵심 수치이고, 각 행의 "period" 필드가 "A"(기준 기간) 또는 "B"(비교 대상 기간)를 나타냅니다. "detailGroups"가 있으면 그 위에 채널·매체 단위까지 더 쪼갠 원본 집계이고, "promoGroups"가 있으면 소재(광고 크리에이티브) 단위 집계입니다. 질문과 관련이 적어 보이는 항목은 아예 생략되어 올 수 있습니다 - 그런 경우 억지로 추측하지 말고 원칙 3에 따라 답하세요. 모든 데이터는 안내된 탭과 A/B 기간 범위로 한정되어 있습니다 - A/B는 반드시 calendar 주(week)가 아니라 사용자가 자유롭게 고른 날짜 범위일 수 있습니다.`;
+"totals"는 목표(goal)별 × 기간(A/B)별로 이미 정확히 계산되어 있는 합계입니다 (spend/gmv/firstPurchase/signup/install 등) - 합계가 필요한 질문은 이걸 그대로 쓰세요. "summary"는 비교 기간(A/B) × 브랜드 × 기획전 단위로 집계된 상세 내역이고, 각 행의 "period" 필드가 "A"(기준 기간) 또는 "B"(비교 대상 기간)를 나타냅니다 - 특정 기획전을 콕 집어 묻는 질문에 쓰세요. "detailGroups"가 있으면 그 위에 채널·매체 단위까지 더 쪼갠 원본 집계이고, "promoGroups"가 있으면 소재(광고 크리에이티브) 단위 집계입니다. 질문과 관련이 적어 보이는 항목은 아예 생략되어 올 수 있습니다 - 그런 경우 억지로 추측하지 말고 원칙 3에 따라 답하세요. 모든 데이터는 안내된 탭과 A/B 기간 범위로 한정되어 있습니다 - A/B는 반드시 calendar 주(week)가 아니라 사용자가 자유롭게 고른 날짜 범위일 수 있습니다.`;
 
 // ROAS·%p는 정수, 비율(%)류는 소수점 둘째 자리까지 - api/comment.js와 동일한 규칙을
 // 여기서도 그대로 적용한다 (요청이 명시적으로 지정한 공유 방식: 간단히 복붙).
@@ -110,6 +111,9 @@ function buildScopedContext(payload) {
     "",
     contextHeader(payload),
     "",
+    "## totals (목표별·기간별 이미 계산된 합계 - 합계 질문엔 이걸 그대로 인용)",
+    JSON.stringify(scoped.totals || {}, null, 2),
+    "",
     "## summary (기간(A/B)·브랜드·기획전 단위 집계)",
     JSON.stringify(scoped.summary || [], null, 2),
     scoped.detailGroups ? `\n## detailGroups (채널·매체 단위 상세)\n${JSON.stringify(scoped.detailGroups, null, 2)}` : "",
@@ -117,15 +121,40 @@ function buildScopedContext(payload) {
   ].join("\n");
 }
 
+// Same reasoning as the scoped path's "totals" (see app.js's computeQaTotals) - the
+// cached context still needs a pre-computed, always-correct total per goal/period,
+// since the raw "groups" list here can run into the hundreds of rows and asking the
+// model to sum that many rows itself is unreliable. Computed from the UNROUNDED
+// source so per-row rounding doesn't compound into the total; the total itself is
+// rounded once at the end.
+function computeTotalsByGoal(groups) {
+  const totals = {};
+  for (const g of groups || []) {
+    if (!totals[g.goal]) totals[g.goal] = { spendA: 0, spendB: 0, gmvA: 0, gmvB: 0, firstPurchaseA: 0, firstPurchaseB: 0, signupA: 0, signupB: 0, installA: 0, installB: 0 };
+    const t = totals[g.goal];
+    const suffix = g.period === "A" ? "A" : "B";
+    t["spend" + suffix] += g.spend || 0;
+    t["gmv" + suffix] += g.gmv || 0;
+    t["firstPurchase" + suffix] += g.firstPurchase || 0;
+    t["signup" + suffix] += g.signup || 0;
+    t["install" + suffix] += g.install || 0;
+  }
+  return totals;
+}
+
 // The cache-seeding path: the FULL unfiltered dataset, sent once by app.js on the
 // "graduation" turn - has to be the complete picture since the cache must answer
 // whatever the session's later, unrelated-goal questions turn out to be.
 function buildFullCacheContext(payload) {
+  const totalsByGoal = roundForPrompt(computeTotalsByGoal((payload.fullData || {}).groups));
   const full = roundForPrompt(payload.fullData || {});
   return [
     SYSTEM_PROMPT,
     "",
     contextHeader(payload),
+    "",
+    "## totals (목표별·기간별 이미 계산된 합계 - 합계 질문엔 이걸 그대로 인용)",
+    JSON.stringify(totalsByGoal, null, 2),
     "",
     "## groups (전체 원본 집계)",
     JSON.stringify(full.groups || [], null, 2),
