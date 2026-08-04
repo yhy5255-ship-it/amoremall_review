@@ -94,18 +94,49 @@
   function topByField(list, field, n) { return [...list].filter(p => p[field] > 0).sort((a, b) => b[field] - a[field]).slice(0, n); }
   const promoKey = (p) => (p.brand || "") + "||" + p.promo;
 
+  // Iterates the UNION of A's and B's promo keys, not just B's - a promo that fully
+  // ended has zero rows left in B (not a zero-value row, no row at all), so scanning
+  // only B's list makes it structurally invisible no matter how big its decline was.
+  // This was a real bug: a campaign ending with no residual activity in B (the common
+  // case) never showed up as a decliner regardless of how much it explained a drop.
   function decliners(groupsA, groupsB, n, field) {
     field = field || "gmv";
     const A = groupByPromo(groupsA), B = groupByPromo(groupsB);
     const mapA = new Map(A.map(p => [promoKey(p), p]));
+    const mapB = new Map(B.map(p => [promoKey(p), p]));
+    const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
     const out = [];
-    for (const pb of B) {
-      const pa = mapA.get(promoKey(pb));
+    for (const key of allKeys) {
+      const pa = mapA.get(key), pb = mapB.get(key);
       const valA = pa ? pa[field] : 0;
-      const delta = pb[field] - valA;
+      const valB = pb ? pb[field] : 0;
+      const delta = valB - valA;
       const minBase = field === "gmv" ? 500000 : 3;
       if (delta < 0 && valA > minBase) {
-        out.push({ promo: pb.promo, brand: pb.brand, status: pb.status, promoEnd: pb.promoEnd, valA, valB: pb[field], delta, deltaPct: valA > 0 ? (delta / valA * 100) : 0 });
+        const src = pb || pa; // prefer B's copy of brand/promo/status, else fall back to A's
+        out.push({ promo: src.promo, brand: src.brand, status: src.status, promoEnd: src.promoEnd, valA, valB, delta, deltaPct: valA > 0 ? (delta / valA * 100) : 0 });
+      }
+    }
+    out.sort((a, b) => a.delta - b.delta);
+    return out.slice(0, n);
+  }
+  // Media-keyed twin of decliners() - some sections (트래픽) reason about media, not
+  // promo, so a promo can't be the attribution unit there. Same union-of-keys fix.
+  function mediaDecliners(groupsA, groupsB, n, field) {
+    field = field || "click";
+    const A = groupByMedia(groupsA), B = groupByMedia(groupsB);
+    const mapA = new Map(A.map(m => [m.media, m]));
+    const mapB = new Map(B.map(m => [m.media, m]));
+    const allMedia = new Set([...mapA.keys(), ...mapB.keys()]);
+    const out = [];
+    for (const media of allMedia) {
+      const ma = mapA.get(media), mb = mapB.get(media);
+      const valA = ma ? ma[field] : 0;
+      const valB = mb ? mb[field] : 0;
+      const delta = valB - valA;
+      const minBase = field === "spend" || field === "gmv" ? 500000 : 3;
+      if (delta < 0 && valA > minBase) {
+        out.push({ media, valA, valB, delta, deltaPct: valA > 0 ? (delta / valA * 100) : 0 });
       }
     }
     out.sort((a, b) => a.delta - b.delta);
@@ -442,6 +473,11 @@
     const suA = sum(revA, "signup"), suB = sum(revB, "signup");
 
     const revDecliners = decliners(revA, revB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    // GMV 기준 decliners만으로는 "첫구매/회원가입" 리드가 근거로 쓸 데이터가 없어서, 그
+    // 지표가 실제로 하락한 이유를 AI가 알 방법이 없었다 (예: 캠페인 종료로 첫구매/회원가입이
+    // 크게 빠졌는데 GMV decliners엔 안 잡히는 경우) - 지표별로 따로 계산해서 넘긴다.
+    const fpDecliners = decliners(revA, revB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const suDecliners = decliners(revA, revB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
 
     // KPF has its own subsection (kept fully deterministic, see buildKpfLead), so it's
     // excluded from the general promo pool used for both the table and the AI prompt.
@@ -463,6 +499,7 @@
       kpiTiles: { roasA, roasB, gmvA, gmvB, fpB, suB },
       prompt: {
         spendA, gmvA, roasA, spendB, gmvB, roasB, fpA, fpB, suA, suB, decliners: revDecliners, top3: top3Revenue,
+        fpDecliners, suDecliners,
         evergreenPromo: `${REVENUE_EVERGREEN_PROMO.brand} · ${REVENUE_EVERGREEN_PROMO.promo}`,
         gmvAExclEvergreen, gmvBExclEvergreen, gmvDeltaPctExclEvergreen,
         declinersExclEvergreen, top3ExclEvergreen,
@@ -515,6 +552,10 @@
     const suCppA = suFpA > 0 ? suSpendA / suFpA : 0, suCppB = suFpB > 0 ? suSpendB / suFpB : 0;
     const suCpaA = suSuA > 0 ? suSpendA / suSuA : 0, suCpaB = suSuB > 0 ? suSpendB / suSuB : 0;
 
+    // 리드마다 근거가 필요한 지표가 다르다 - "매출" 리드는 GMV 기준, "첫구매/신규가입"
+    // 리드는 첫구매·신규가입 기준으로 각각 무엇이 하락했는지 알아야 하므로 지표별로 따로 계산한다.
+    const gmvDecliners = decliners(suGA, suGB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const fpDecliners = decliners(suGA, suGB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const suDecliners = decliners(suGA, suGB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
 
     const detailPoolB = groupByPromo(suGB);
@@ -527,7 +568,7 @@
       prompt: {
         spendA: suSpendA, gmvA: suGmvA, roasA: suRoasA, spendB: suSpendB, gmvB: suGmvB, roasB: suRoasB,
         fpA: suFpA, fpB: suFpB, suA: suSuA, suB: suSuB, cppA: suCppA, cppB: suCppB, cpaA: suCpaA, cpaB: suCpaB,
-        decliners: suDecliners, topSignupPromos: topSignupPromosB,
+        gmvDecliners, fpDecliners, suDecliners, topSignupPromos: topSignupPromosB,
       },
     };
   }
@@ -557,14 +598,15 @@
   // 그래서 "값이 0인 매체"를 동적으로 추론하는 대신, 이 상수로 명시적으로 고정한다.
   const UNSUPPORTED_FP_SU_MEDIA = ["Apple Search Ads"];
 
-  function computeAppData(groupsA, groupsB) {
+  function computeAppData(groupsA, groupsB, weekARange, weekBRange) {
     const appA = groupsA.filter(g => g.goal === "앱설치"), appB = groupsB.filter(g => g.goal === "앱설치");
     const installA = sum(appA, "install"), installB = sum(appB, "install");
     const spendA = sum(appA, "spend"), spendB = sum(appB, "spend");
     const cpiA = cpi_(spendA, installA), cpiB = cpi_(spendB, installB);
     const gmvA = sum(appA, "gmv"), gmvB = sum(appB, "gmv");
     const roasA = roas(gmvA, spendA), roasB = roas(gmvB, spendB);
-    const fpB = sum(appB, "firstPurchase"), suB = sum(appB, "signup");
+    const fpA = sum(appA, "firstPurchase"), fpB = sum(appB, "firstPurchase");
+    const suA = sum(appA, "signup"), suB = sum(appB, "signup");
 
     const mediaB = groupByMedia(appB).sort((a, b) => b.install - a.install);
     const mediaA = groupByMedia(appA);
@@ -589,15 +631,27 @@
     const detailPoolA = groupByPromo(appPromoA);
     const topGmvPromos = topByGmv(detailPoolB, 3).map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvB) }));
 
+    // topInstallPromos/topGmvPromos만으로는 "B기간에 잘한 것"만 보이고, 기획전이 완전히
+    // 종료돼서 이번 기간엔 0에 가까운 경우는 top-N에서 아예 빠져 사라진 이유를 알 수 없다 -
+    // 리드별로 실제 하락 요인을 짚을 수 있게 지표마다 decliners를 따로 계산한다.
+    const installDecliners = decliners(appPromoA, appPromoB, 3, "install").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const gmvDecliners = decliners(appPromoA, appPromoB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const fpDecliners = decliners(appPromoA, appPromoB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const suDecliners = decliners(appPromoA, appPromoB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+
     return {
       detailPoolB, detailPoolA,
       kpiTiles: { installA, installB, cpiA, cpiB, roasA, roasB, fpB, suB },
-      prompt: { installA, installB, cpiA, cpiB, spendA, spendB, gmvA, gmvB, roasA, roasB, fpB, suB, mediaBreakdown, unsupportedFpSuMedia, topInstallPromos, topGmvPromos },
+      prompt: {
+        installA, installB, cpiA, cpiB, spendA, spendB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB,
+        mediaBreakdown, unsupportedFpSuMedia, topInstallPromos, topGmvPromos,
+        installDecliners, gmvDecliners, fpDecliners, suDecliners,
+      },
     };
   }
 
-  function buildAppSection(groupsA, groupsB, weekALabel, weekBLabel) {
-    const d = computeAppData(groupsA, groupsB);
+  function buildAppSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel) {
+    const d = computeAppData(groupsA, groupsB, weekARange, weekBRange);
     return {
       html: `
     <section class="section-card" data-ch="앱설치">
@@ -617,7 +671,7 @@
   }
 
   // ---------- 트래픽 (목표=트래픽) ----------
-  function computeTrafficData(groupsA, groupsB) {
+  function computeTrafficData(groupsA, groupsB, weekARange, weekBRange) {
     const trA = groupsA.filter(g => g.goal === "트래픽"), trB = groupsB.filter(g => g.goal === "트래픽");
     if (!trB.length) return null;
 
@@ -627,26 +681,38 @@
     const ctrA = ctr_(clickA, imprA), cpcA = cpc_(spendA, clickA);
     const gmvB = sum(trB, "gmv"), gmvA = sum(trA, "gmv");
     const roasB = roas(gmvB, spendB), roasA = roas(gmvA, spendA);
-    const fpB = sum(trB, "firstPurchase"), suB = sum(trB, "signup");
+    const fpA = sum(trA, "firstPurchase"), fpB = sum(trB, "firstPurchase");
+    const suA = sum(trA, "signup"), suB = sum(trB, "signup");
     const viewsB = sum(trB, "views"), viewsA = sum(trA, "views");
 
     const mediaB = groupByMedia(trB).sort((a, b) => b.spend - a.spend);
     const mediaList = mediaB.map(m => m.media);
     const topMediaByGmv = [...mediaB].sort((a, b) => b.gmv - a.gmv)[0];
+    // topMediaByGmv/mediaList는 B기간 현재 상태만 보여줘서, 클릭이 줄어든 이유(어떤 매체가
+    // 빠졌는지)를 설명 못 한다 - "트래픽" 리드가 쓸 매체 단위 decliners를 별도로 계산한다.
+    const clickDecliners = mediaDecliners(trA, trB, 3, "click");
 
     // 세부 데이터는 매체가 아니라 브랜드/기획전 단위로 보여준다 (매체는 AI 코멘트에서만 언급).
     const detailPoolB = groupByPromo(trB);
     const detailPoolA = groupByPromo(trA);
+    // "매출"/"첫구매/회원가입" 리드는 기획전 단위 하락 요인이 필요하다 (매체 단위 decliners와는 별개).
+    const gmvDecliners = decliners(trA, trB, 3, "gmv");
+    const fpDecliners = decliners(trA, trB, 3, "firstPurchase");
+    const suDecliners = decliners(trA, trB, 3, "signup");
 
     return {
       detailPoolB, detailPoolA,
       kpiTiles: { ctrA, ctrB, cpcA, cpcB, roasA, roasB, fpB, suB, viewsA, viewsB },
-      prompt: { ctrA, ctrB, cpcA, cpcB, viewsA, viewsB, gmvA, gmvB, roasA, roasB, fpB, suB, spendA, spendB, mediaList, topMediaByGmv: topMediaByGmv ? topMediaByGmv.media : null },
+      prompt: {
+        ctrA, ctrB, cpcA, cpcB, viewsA, viewsB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB, spendA, spendB,
+        mediaList, topMediaByGmv: topMediaByGmv ? topMediaByGmv.media : null,
+        clickDecliners, gmvDecliners, fpDecliners, suDecliners,
+      },
     };
   }
 
-  function buildTrafficSection(groupsA, groupsB, weekALabel, weekBLabel) {
-    const d = computeTrafficData(groupsA, groupsB);
+  function buildTrafficSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel) {
+    const d = computeTrafficData(groupsA, groupsB, weekARange, weekBRange);
     if (!d) {
       return {
         html: `<section class="section-card" data-ch="트래픽">
@@ -1147,8 +1213,8 @@
 
     const rev = buildRevenueSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
     const signup = buildSignupSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
-    const app = buildAppSection(groupsA, groupsB, weekALabel, weekBLabel);
-    const traffic = buildTrafficSection(groupsA, groupsB, weekALabel, weekBLabel);
+    const app = buildAppSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
+    const traffic = buildTrafficSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
 
     sectionsEl.innerHTML = buildTopPromoSection(promoGroupsB) + rev.html + signup.html + app.html + traffic.html;
     initDetailBlocks();

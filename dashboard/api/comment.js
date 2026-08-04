@@ -104,38 +104,45 @@ const SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅 분석가�
 
 "첫구매/회원가입" 리드:
 - 금주 첫구매(fpB)/회원가입(suB) 발생 수
-- 전주(fpA/suA) 대비 증감 및 간단한 영향 요인
+- 전주(fpA/suA) 대비 증감 - 원인은 반드시 fpDecliners(첫구매 기준 하락 기획전)와 suDecliners(회원가입 기준 하락 기획전)를 근거로 짚어주세요 (decliners/declinersExclEvergreen은 매출=GMV 기준이라 첫구매·회원가입 하락의 원인 기획전과 다를 수 있습니다 - 반드시 fpDecliners/suDecliners를 확인하세요). ended 필드가 true면 "종료"를, 아니면 감소 자체를 근거로 서술하고, fpDecliners/suDecliners에도 마땅한 후보가 없으면 원칙 3에 따라 "원인 불명, 확인 필요"라고 쓰세요.
 
 ### 신규가입
 "매출" 리드:
-- 매출 전주 대비 증감률(%p), 금주 ROAS, 주요 영향 기획전(decliners)
+- 매출 전주 대비 증감률(%p), 금주 ROAS
+- 주요 영향 기획전은 반드시 gmvDecliners(매출=GMV 기준 하락 기획전)를 근거로 짚어주세요. ended가 true면 "종료"를 이유로 서술하세요.
 
 "첫구매/신규가입" 리드:
 - 첫구매(fpA/fpB)와 신규가입(suA/suB) 각각 금주 발생 수 및 전주 대비 증감
+- 증감의 원인은 fpDecliners(첫구매 기준 하락 기획전)와 suDecliners(회원가입 기준 하락 기획전)를 근거로 짚어주세요 (gmvDecliners는 매출 기준이라 첫구매·회원가입 하락 원인과 다를 수 있으니 반드시 fpDecliners/suDecliners를 확인). 마땅한 후보가 없으면 원칙 3에 따라 "원인 불명, 확인 필요"라고 쓰세요.
 - 전주 대비 금주 첫구매 단가(cppA/cppB) 증감액 및 회원가입 단가(cpaA/cpaB) 증감액
 - topSignupPromos에 있는 기획전이 신규모객을 리드했는지 언급 (브랜드+기획전명 함께)
 
 ### 앱설치
 "앱설치" 리드:
 - 전주 대비 매체별(mediaBreakdown) 앱설치수 변동 및 총 CPI 변동
-- 앱설치 변동에 가장 영향을 준 기획전 (topInstallPromos, share% 포함, 브랜드+기획전명 함께)
+- 앱설치 변동에 가장 영향을 준 기획전은 topInstallPromos(현재 상위권)와 installDecliners(하락 기획전 - 기획전이 아예 종료돼서 top-N에서 빠진 경우까지 잡아줍니다)를 함께 참고해서 짚어주세요 (Google/AC 매체 기준, 브랜드+기획전명 함께). ended가 true면 "종료"를 이유로 서술하세요.
 
 "매출" 리드:
-- 기획전 기준 매출 리드 상위 (topGmvPromos, 브랜드+기획전명 함께)
+- 기획전 기준 매출은 topGmvPromos(현재 상위권)와 gmvDecliners(하락 기획전)를 함께 참고 (브랜드+기획전명 함께)
 - 매출 전주 대비 증감률(%p), 금주 ROAS, 주요 영향 매체
 
 "첫구매/회원가입" 리드:
-- 첫구매/회원가입 금주 총 발생 수 (unsupportedFpSuMedia에 있는 매체는 구조적으로 수집 불가한 매체이니 확인 불가로 표시)
+- 금주 첫구매(fpB)/회원가입(suB) 발생 수, 전주(fpA/suA) 대비 증감
+- 증감 원인은 fpDecliners/suDecliners를 근거로 짚어주고, 마땅한 후보가 없으면 "원인 불명, 확인 필요"라고 쓰세요
+- unsupportedFpSuMedia에 있는 매체는 구조적으로 수집 불가하니 확인 불가로 표시
 
 ### 트래픽
 "트래픽" 리드:
 - 금주 집행 매체(mediaList), 평균 CTR/CPC, 조회수(viewsA/viewsB) 전주 대비 증감
+- 클릭 감소의 주요 원인은 clickDecliners(매체 단위 클릭 하락)를 근거로 짚어주세요 (topMediaByGmv/mediaList는 현재 상위권만 보여줘서, 매체가 아예 빠진 경우의 원인은 clickDecliners를 봐야 합니다)
 
 "매출" 리드:
 - 매출 대다수를 차지한 매체(topMediaByGmv), 전체 ROAS, 전주 대비 증감률
+- 매출 하락의 주요 영향 기획전은 반드시 gmvDecliners(기획전 단위, 브랜드+기획전명 함께)를 근거로 짚어주세요. ended가 true면 "종료"를 이유로 서술하세요. 마땅한 후보가 없으면 "원인 불명, 확인 필요"라고 쓰세요.
 
 "첫구매/회원가입" 리드:
-- 첫구매/회원가입 금주 총 발생 수`;
+- 금주 첫구매(fpB)/회원가입(suB) 발생 수, 전주(fpA/suA) 대비 증감
+- 증감 원인은 fpDecliners/suDecliners를 근거로 짚어주고, 마땅한 후보가 없으면 "원인 불명, 확인 필요"라고 쓰세요`;
 
 // ROAS/%p류는 정수, 비율(%)류는 소수점 둘째자리까지로 미리 반올림해서 모델에 넘긴다 -
 // 모델이 스스로 계산한 파생 수치까지는 못 잡아주지만, 데이터에 있는 값은 이미 규칙에
