@@ -191,9 +191,8 @@ select:focus, input:focus, textarea:focus, button:focus-visible{
 .section-card[data-ch="신규가입"] .comment > ul > li > b.lead::before{color:var(--accent-4);}
 .section-card[data-ch="앱설치"] .comment > ul > li > b.lead::before{color:var(--accent-2);}
 .section-card[data-ch="트래픽"] .comment > ul > li > b.lead::before{color:var(--accent-3);}
-.comment ul ul{margin-top:4px;}
+.comment ul ul{margin-top:4px; padding-left:2px; list-style:none;}
 .comment ul ul li{font-size:13px; margin-bottom:6px; color:var(--ink);}
-.comment ul ul li::marker{color:var(--ink-soft);}
 .basis-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:middle; cursor:help;}
 .basis-dot.basis-data{background:var(--ink-soft);}
 .basis-dot.basis-note{background:var(--accent-4);}

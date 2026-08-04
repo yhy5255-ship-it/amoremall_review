@@ -426,6 +426,11 @@
   }
 
   // ---------- 매출 (목표=매출) ----------
+  // 이 기획전은 거의 매주 매출 기여도가 가장 높게 나오는 상시성 캠페인이라, 늘 상위권을
+  // 차지해서 "그 주에 실제로 무슨 일이 있었는지"를 가려버린다 - AI 코멘트에 이 기획전을
+  // 제외했을 때의 매출 증감도 같이 계산해서 줘서, 그 뒤에 가려진 실제 변동 요인을 짚어주게 한다.
+  const REVENUE_EVERGREEN_PROMO = { brand: "통합", promo: "1만원이상_시즌" };
+
   function computeRevenueData(groupsA, groupsB, weekARange, weekBRange) {
     const isRev = g => g.goal === "매출";
     const revA = groupsA.filter(isRev), revB = groupsB.filter(isRev);
@@ -433,7 +438,8 @@
     const spendA = sum(revA, "spend"), gmvA = sum(revA, "gmv");
     const spendB = sum(revB, "spend"), gmvB = sum(revB, "gmv");
     const roasA = roas(gmvA, spendA), roasB = roas(gmvB, spendB);
-    const fpB = sum(revB, "firstPurchase"), suB = sum(revB, "signup");
+    const fpA = sum(revA, "firstPurchase"), fpB = sum(revB, "firstPurchase");
+    const suA = sum(revA, "signup"), suB = sum(revB, "signup");
 
     const revDecliners = decliners(revA, revB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
 
@@ -443,10 +449,24 @@
     const detailPoolA = groupByPromo(revA.filter(g => g.channel !== "KPF"));
     const top3Revenue = topByGmv(detailPoolB, 3).map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvB) }));
 
+    const isEvergreen = g => g.brand === REVENUE_EVERGREEN_PROMO.brand && g.promo === REVENUE_EVERGREEN_PROMO.promo;
+    const revAExclEvergreen = revA.filter(g => !isEvergreen(g));
+    const revBExclEvergreen = revB.filter(g => !isEvergreen(g));
+    const gmvAExclEvergreen = sum(revAExclEvergreen, "gmv"), gmvBExclEvergreen = sum(revBExclEvergreen, "gmv");
+    const gmvDeltaPctExclEvergreen = gmvAExclEvergreen > 0 ? ((gmvBExclEvergreen - gmvAExclEvergreen) / gmvAExclEvergreen * 100) : null;
+    const declinersExclEvergreen = decliners(revAExclEvergreen, revBExclEvergreen, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const top3ExclEvergreen = topByGmv(groupByPromo(revBExclEvergreen.filter(g => g.channel !== "KPF")), 3)
+      .map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvBExclEvergreen) }));
+
     return {
       detailPoolB, detailPoolA,
       kpiTiles: { roasA, roasB, gmvA, gmvB, fpB, suB },
-      prompt: { spendA, gmvA, roasA, spendB, gmvB, roasB, fpB, suB, decliners: revDecliners, top3: top3Revenue },
+      prompt: {
+        spendA, gmvA, roasA, spendB, gmvB, roasB, fpA, fpB, suA, suB, decliners: revDecliners, top3: top3Revenue,
+        evergreenPromo: `${REVENUE_EVERGREEN_PROMO.brand} · ${REVENUE_EVERGREEN_PROMO.promo}`,
+        gmvAExclEvergreen, gmvBExclEvergreen, gmvDeltaPctExclEvergreen,
+        declinersExclEvergreen, top3ExclEvergreen,
+      },
     };
   }
 
@@ -671,9 +691,16 @@
     const key = BASIS_LABEL[basis] ? basis : "data";
     return `<span class="basis-dot basis-${key}" title="${esc(BASIS_LABEL[key])}"></span>`;
   }
+  // The basis dot is the only bullet marker a detail line should show - but the
+  // model occasionally still writes a literal "· "/"• " prefix into the text itself
+  // (despite being told not to), which then doubles up with the dot. Strip it
+  // defensively so a rendering/copy bug isn't at the mercy of prompt compliance.
+  function stripLeadingBullet(text) {
+    return String(text).replace(/^[\s]*[·•∙‧-]\s*/, "");
+  }
   function renderLeadsHtml(leads) {
     return `<ul>${leads.map(lead => `<li><b class="lead">${esc(lead.title)}</b>
-      <ul>${lead.details.map(detail => `<li>${basisDotHtml(detail.basis)}${highlightBrackets(esc(detail.text)).replace(/\n/g, "<br>")}</li>`).join("")}</ul>
+      <ul>${lead.details.map(detail => `<li>${basisDotHtml(detail.basis)}${highlightBrackets(esc(stripLeadingBullet(detail.text))).replace(/\n/g, "<br>")}</li>`).join("")}</ul>
     </li>`).join("")}</ul>`;
   }
 
@@ -713,7 +740,8 @@
           out += `l  ${lead.title}\n`;
           for (const detail of lead.details) {
             // Plain-text export stays basis-badge-free - the dots are a screen-only aid.
-            const lines = String(detail.text).split("\n");
+            // stripLeadingBullet() avoids a doubled "·  · ..." if the model included one itself.
+            const lines = stripLeadingBullet(detail.text).split("\n");
             out += `·  ${lines[0]}\n`;
             for (let i = 1; i < lines.length; i++) out += `${lines[i]}\n`;
           }
