@@ -19,7 +19,7 @@ const fs = require("fs");
 const { JWT } = require("google-auth-library");
 
 const SPREADSHEET_ID = "1-vb3s2ewP1Kl_v3_PGHWrON3mLA6N1OGmyN_NhSC86M";
-const TABS = ["2607"]; // keep in sync with scripts/export_agg.py's TABS
+const MONTH_TAB_RE = /^\d{4}$/; // "2607", "2608", ... - excludes "Index" and other reference tabs
 const DEFAULT_KEY_PATH = "c:\\Users\\wisebirds\\.secrets\\arctic-plate-468205-n6-a485ae6332e7.json";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -61,6 +61,21 @@ async function getAccessToken() {
   });
   const { token } = await client.getAccessToken();
   return token;
+}
+
+// New monthly tabs (2608, 2609, ...) keep getting added to the sheet over time,
+// so tabs are discovered automatically instead of a hardcoded list - mirrors
+// scripts/export_agg.py's discover_month_tabs().
+async function discoverMonthTabs(token) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties.title`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Sheets API ${res.status}${body ? `: ${body}` : ""}`);
+  }
+  const json = await res.json();
+  const titles = (json.sheets || []).map(s => s.properties.title);
+  return titles.filter(t => MONTH_TAB_RE.test(t)).sort();
 }
 
 async function fetchTabValues(tab, token) {
@@ -168,8 +183,9 @@ module.exports = async (req, res) => {
   }
   try {
     const token = await getAccessToken();
+    const tabs = await discoverMonthTabs(token);
     const data = { tabs: {} };
-    for (const tab of TABS) {
+    for (const tab of tabs) {
       const values = await fetchTabValues(tab, token);
       const tabData = aggregateTab(tab, values);
       if (tabData) data.tabs[tab] = tabData;

@@ -32,7 +32,7 @@ if sys.stdout.encoding != "utf-8":
 
 KEY_PATH = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY", r"c:\Users\wisebirds\.secrets\arctic-plate-468205-n6-a485ae6332e7.json")
 SPREADSHEET_ID = "1-vb3s2ewP1Kl_v3_PGHWrON3mLA6N1OGmyN_NhSC86M"
-TABS = ["2607"]  # add "2608", "2609", ... here as new monthly tabs appear
+MONTH_TAB_RE = re.compile(r"^\d{4}$")  # "2607", "2608", ... - excludes "Index" and other reference tabs
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_PATH = os.path.join(SCRIPT_DIR, "..", "data.json")
 
@@ -198,9 +198,20 @@ def export_tab(tab_name):
     }
 
 
+def discover_month_tabs():
+    """New monthly tabs (2608, 2609, ...) keep getting added to the sheet over
+    time, so tabs are discovered automatically instead of relying on a hardcoded
+    list someone has to remember to update every month."""
+    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID, includeGridData=False).execute()
+    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    return sorted(t for t in titles if MONTH_TAB_RE.match(t))
+
+
 def main():
+    tabs = discover_month_tabs()
+    print("discovered month tabs:", tabs)
     data = {"tabs": {}}
-    for tab in TABS:
+    for tab in tabs:
         tab_data = export_tab(tab)
         if tab_data:
             data["tabs"][tab] = tab_data

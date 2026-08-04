@@ -53,7 +53,7 @@ pip install google-api-python-client google-auth
 python scripts/export_agg.py
 ```
 
-기본적으로 `scripts/export_agg.py` 안의 `KEY_PATH`를 사용하며, `GOOGLE_SERVICE_ACCOUNT_KEY` 환경변수로 다른 키 파일 경로를 지정할 수도 있다. 새로운 월 탭(예: `2608`)이 추가되면 스크립트의 `TABS` 리스트에 이름을 추가하고, **`api/refresh.js`의 `TABS` 상수도 같이 맞춰줘야 한다** (두 파일이 독립적으로 유지된다).
+기본적으로 `scripts/export_agg.py` 안의 `KEY_PATH`를 사용하며, `GOOGLE_SERVICE_ACCOUNT_KEY` 환경변수로 다른 키 파일 경로를 지정할 수도 있다. 새로운 월 탭(예: `2608`, `2609`, ...)은 시트에 추가되는 즉시 자동으로 인식된다 — `scripts/export_agg.py`와 `api/refresh.js` 둘 다 시트 메타데이터를 조회해서 탭 이름이 `숫자 4자리`(예: `2607`)인 탭만 자동으로 찾아 집계하므로, 코드를 손댈 필요가 없다.
 
 ## 시트 컬럼 매핑
 
