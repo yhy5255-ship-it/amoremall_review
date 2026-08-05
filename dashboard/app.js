@@ -175,24 +175,6 @@
     return [...m.values()];
   }
 
-  // Same idea for the AE/AF/AG/AW-level promoGroups feeding the TOP5 leaderboard.
-  function aggregatePromoGroupsByDateRange(rows, start, end) {
-    const m = new Map();
-    for (const p of rows) {
-      if (!p.date || p.date < start || p.date > end) continue;
-      const key = [p.goal, p.promoFull, p.brand, p.promo, p.material, p.status, p.promoStart, p.promoEnd].join("||");
-      if (!m.has(key)) m.set(key, {
-        goal: p.goal, promoFull: p.promoFull, brand: p.brand, promo: p.promo, material: p.material,
-        status: p.status, promoStart: p.promoStart, promoEnd: p.promoEnd,
-        spend: 0, gmv: 0, impr: 0, click: 0, views: 0, firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0,
-      });
-      const o = m.get(key);
-      o.spend += p.spend; o.gmv += p.gmv; o.impr += p.impr; o.click += p.click; o.views += (p.views || 0);
-      o.firstPurchase += p.firstPurchase; o.signup += p.signup; o.install += p.install; o.purchaseConv += p.purchaseConv;
-    }
-    return [...m.values()];
-  }
-
   function shiftDate(dateStr, deltaDays) {
     const d = new Date(dateStr + "T00:00:00Z");
     d.setUTCDate(d.getUTCDate() + deltaDays);
@@ -356,93 +338,98 @@
     }
   }
 
-  // ---------- top-promo leaderboard (uses AE/AF/AG/AW breakdown; filterable by 목표, rankable by 5 metrics) ----------
-  function groupPromoInstances(promoRows) {
-    const m = new Map();
-    for (const p of promoRows) {
-      const key = p.promoFull || (p.brand + "_" + p.promo);
-      if (!m.has(key)) m.set(key, {
-        promoFull: key, brand: p.brand, promo: p.promo, status: p.status,
-        promoStart: p.promoStart, promoEnd: p.promoEnd,
-        spend: 0, gmv: 0, impr: 0, click: 0, views: 0, firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0, materials: []
-      });
-      const o = m.get(key);
-      o.spend += p.spend; o.gmv += p.gmv; o.impr += p.impr; o.click += p.click; o.views += p.views;
-      o.firstPurchase += p.firstPurchase; o.signup += p.signup; o.install += p.install; o.purchaseConv += p.purchaseConv;
-      if (p.material) o.materials.push(p);
-    }
-    return [...m.values()];
-  }
-
   const GOAL_ORDER = ["매출", "신규가입", "앱설치", "트래픽"];
 
-  const TOP_METRICS = {
-    gmv:   { label: "매출(GMV)",   dir: -1, val: p => p.gmv,                                   main: p => fmtWonAbbrev(p.gmv),                            sub: p => `ROAS ${fmtPct(roas(p.gmv, p.spend))}` },
-    roas:  { label: "ROAS",        dir: -1, val: p => roas(p.gmv, p.spend),                    main: p => fmtPct(roas(p.gmv, p.spend)),                   sub: p => `매출 ${fmtWonAbbrev(p.gmv)}` },
-    fp:    { label: "첫구매 수",    dir: -1, val: p => p.firstPurchase,   filter: p => p.firstPurchase > 0, main: p => fmtCount(p.firstPurchase),           sub: p => `첫구매 CPA ${fmtWon(p.spend / p.firstPurchase)}` },
-    fpCpa: { label: "첫구매 CPA",   dir: 1,  val: p => p.spend / p.firstPurchase, filter: p => p.firstPurchase > 0 && p.spend > 0, main: p => fmtWon(p.spend / p.firstPurchase), sub: p => `첫구매 ${fmtCount(p.firstPurchase)}` },
-    su:    { label: "회원가입 수",  dir: -1, val: p => p.signup,          filter: p => p.signup > 0,        main: p => fmtCount(p.signup),                  sub: p => `가입 CPA ${fmtWon(p.spend / p.signup)}` },
-    suCpa: { label: "회원가입 CPA", dir: 1,  val: p => p.spend / p.signup, filter: p => p.signup > 0 && p.spend > 0, main: p => fmtWon(p.spend / p.signup),          sub: p => `회원가입 ${fmtCount(p.signup)}` },
-  };
+  // ---------- media performance (goal dropdown, A vs B per media, 6 metrics) ----------
+  let mediaPerfState = null; // {groupsA, groupsB} for the currently rendered A/B range
 
-  function rankByMetric(list, metricKey) {
-    const m = TOP_METRICS[metricKey];
-    const pool = m.filter ? list.filter(m.filter) : list;
-    return [...pool].sort((a, b) => m.dir === -1 ? m.val(b) - m.val(a) : m.val(a) - m.val(b));
+  function computeMediaPerformance(groupsA, groupsB, goal) {
+    const mediaA = groupByMedia(groupsA.filter(g => g.goal === goal));
+    const mediaB = groupByMedia(groupsB.filter(g => g.goal === goal));
+    const mapA = new Map(mediaA.map(m => [m.media, m]));
+    const mapB = new Map(mediaB.map(m => [m.media, m]));
+    const allMedia = new Set([...mapA.keys(), ...mapB.keys()]);
+    const empty = { spend: 0, gmv: 0, firstPurchase: 0, signup: 0 };
+    const rows = [...allMedia].map(media => ({ media, a: mapA.get(media) || empty, b: mapB.get(media) || empty }));
+    rows.sort((r1, r2) => r2.b.spend - r1.b.spend);
+    return rows;
   }
 
-  let topPromoRaw = [];  // all promoGroups rows for the rendered week (every 목표), kept for the 목표 dropdown
-  let topPromoPool = []; // instances grouped for the currently selected 목표, kept for the metric dropdown
-
-  function updateTopPromoPool(goal) {
-    const instances = groupPromoInstances(topPromoRaw.filter(p => p.goal === goal));
-    topPromoPool = instances.filter(p => p.spend > 0 || p.gmv > 0);
+  function deltaMeta(valA, valB) {
+    const d = valB - valA;
+    const cls = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
+    const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
+    let pct = "";
+    if (valA !== 0) pct = `${d >= 0 ? "+" : ""}${Math.round((d / valA) * 100)}%`;
+    else if (valB !== 0) pct = "신규";
+    return { cls, arrow, pct };
   }
 
-  function renderTopPromoBoard(metricKey) {
-    const body = document.getElementById("topPromoBody");
-    if (!body) return;
-    const m = TOP_METRICS[metricKey];
-    const top = rankByMetric(topPromoPool, metricKey).slice(0, 5);
-    if (!top.length) { body.innerHTML = `<p class="empty-note">이 지표로 순위를 매길 데이터가 없습니다.</p>`; return; }
-    const period = (s, e) => (!e || e === "상시") ? "상시 운영" : `${fmtDate(s)}~${fmtDate(e)}`;
-    body.innerHTML = `<div class="board">${top.map((p, i) => {
-      const bestMat = [...p.materials].sort((a, b) => b.gmv - a.gmv)[0];
-      return `<div class="board-item">
-        <div class="board-rank${i === 0 ? " r1" : ""}">${i + 1}</div>
-        <div class="board-main">
-          <div class="name">${esc(p.brand)} · ${esc(p.promo)}</div>
-          <div class="meta">${period(p.promoStart, p.promoEnd)} · 구매 ${fmtCount(p.purchaseConv)} · 첫구매 ${fmtCount(p.firstPurchase)} · 회원가입 ${fmtCount(p.signup)}</div>
-          ${bestMat ? `<div class="best-material"><span class="k">베스트 소재</span> ${esc(bestMat.material || "-")} · 매출 ${fmtWonAbbrev(bestMat.gmv)} · 구매 ${fmtCount(bestMat.purchaseConv)}</div>` : ""}
-        </div>
-        <div class="board-nums">
-          <div class="gmv">${m.main(p)}</div>
-          <div class="roas">${m.sub(p)}</div>
-        </div>
+  // headline metric (GMV/ROAS): big current value + small "이전 A값 (증감)" line underneath
+  function mediaHeadlineStat(label, valA, valB, fmt) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB);
+    return `<div class="m-stat">
+      <div class="m-primary"><span class="k">${label}</span><span class="v">${fmt(valB)}</span></div>
+      <div class="m-secondary"><span class="k">${arrow} 이전 ${fmt(valA)}</span><span class="v delta ${cls}">${pct}</span></div>
+    </div>`;
+  }
+
+  // secondary metric row (첫구매/CPA/가입/CPA): compact "A값 → B값 (▲증감%)", or an opts.na override
+  function mediaSubRowHtml(label, valA, valB, fmt, opts) {
+    opts = opts || {};
+    if (opts.na) {
+      return `<div class="m-sub-row"><span class="lbl">${label}</span><span class="cell-na">${opts.na}</span></div>`;
+    }
+    const { cls, arrow, pct } = deltaMeta(valA, valB);
+    const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
+    return `<div class="m-sub-row"><span class="lbl">${label}</span><span>${fmt(valA)} → ${fmt(valB)}${pctText}</span></div>`;
+  }
+
+  function renderMediaPerformance(goal) {
+    const body = document.getElementById("mediaPerfBody");
+    if (!body || !mediaPerfState) return;
+    const rows = computeMediaPerformance(mediaPerfState.groupsA, mediaPerfState.groupsB, goal);
+    if (!rows.length) { body.innerHTML = `<p class="empty-note">이 목표에는 매체 데이터가 없습니다.</p>`; return; }
+
+    const cards = rows.map(({ media, a, b }) => {
+      const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
+      // ASA는 매체 구조상 첫구매/회원가입 집계가 원천적으로 불가능하다 (앱설치 섹션과 동일한 규칙).
+      const naAll = UNSUPPORTED_FP_SU_MEDIA.includes(media);
+      const fpCpaValid = !naAll && a.firstPurchase > 0 && b.firstPurchase > 0;
+      const suCpaValid = !naAll && a.signup > 0 && b.signup > 0;
+      const subRows = [
+        mediaSubRowHtml("첫구매", a.firstPurchase, b.firstPurchase, fmtCount, { na: naAll ? "(수집 불가)" : null }),
+        mediaSubRowHtml("첫구매 CPA", a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon, { na: naAll ? "(수집 불가)" : (fpCpaValid ? null : "-") }),
+        mediaSubRowHtml("회원가입", a.signup, b.signup, fmtCount, { na: naAll ? "(수집 불가)" : null }),
+        mediaSubRowHtml("가입 CPA", a.spend / a.signup, b.spend / b.signup, fmtWon, { na: naAll ? "(수집 불가)" : (suCpaValid ? null : "-") }),
+      ].join("");
+
+      return `<div class="media-card">
+        <div class="m-name">${esc(media)}</div>
+        ${mediaHeadlineStat("GMV", a.gmv, b.gmv, fmtWonAbbrev)}
+        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct)}
+        <hr>
+        ${subRows}
       </div>`;
-    }).join("")}</div>`;
+    }).join("");
+
+    body.innerHTML = `<div class="card-grid">${cards}</div>`;
   }
 
-  function buildTopPromoSection(promoGroupsB) {
-    topPromoRaw = promoGroupsB || [];
-    if (!topPromoRaw.length) return "";
-    const goals = GOAL_ORDER.filter(g => topPromoRaw.some(p => p.goal === g));
+  function buildMediaPerformanceSection(groupsA, groupsB) {
+    const goals = GOAL_ORDER.filter(g => groupsA.some(x => x.goal === g) || groupsB.some(x => x.goal === g));
     if (!goals.length) return "";
+    mediaPerfState = { groupsA, groupsB };
     const defaultGoal = goals.includes("매출") ? "매출" : goals[0];
-    updateTopPromoPool(defaultGoal);
-    if (!topPromoPool.length) return "";
-
     const goalOptions = goals.map(g => `<option value="${g}"${g === defaultGoal ? " selected" : ""}>${g}</option>`).join("");
-    const metricOptions = Object.entries(TOP_METRICS).map(([k, m]) => `<option value="${k}">${m.label}</option>`).join("");
 
     return `
-    <section class="section-card" data-ch="TOP">
+    <section class="section-card" data-ch="MEDIA">
       <div class="section-title">
-        <span class="tag">INSIGHT</span><h3>이번주 우수 기획전 TOP 5</h3>
-        <select id="topGoalSelect" class="top-metric-select">${goalOptions}</select>
-        <select id="topMetricSelect" class="top-metric-select">${metricOptions}</select>
+        <span class="tag">MEDIA</span><h3>매체 성과</h3>
+        <select id="mediaGoalSelect" class="top-metric-select">${goalOptions}</select>
       </div>
-      <div id="topPromoBody"></div>
+      <div id="mediaPerfBody"></div>
     </section>`;
   }
 
@@ -1242,8 +1229,6 @@
     document.getElementById("labelA").textContent = weekALabel;
     document.getElementById("labelB").textContent = weekBLabel;
 
-    const promoGroupsB = aggregatePromoGroupsByDateRange(DATA_CURRENT.promoGroups, startB, endB);
-
     // Q&A raw context: tag each row with which period it falls in. A row inside an
     // A/B overlap (user's own choice, just warned about above) matches A first -
     // an acceptable simplification since perfect overlap handling isn't the point.
@@ -1269,18 +1254,13 @@
     const app = buildAppSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
     const traffic = buildTrafficSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
 
-    sectionsEl.innerHTML = buildTopPromoSection(promoGroupsB) + rev.html + signup.html + app.html + traffic.html;
+    sectionsEl.innerHTML = buildMediaPerformanceSection(groupsA, groupsB) + rev.html + signup.html + app.html + traffic.html;
     initDetailBlocks();
 
-    const topGoalSelect = document.getElementById("topGoalSelect");
-    const topMetricSelect = document.getElementById("topMetricSelect");
-    if (topMetricSelect) {
-      renderTopPromoBoard(topMetricSelect.value);
-      topGoalSelect.addEventListener("change", () => {
-        updateTopPromoPool(topGoalSelect.value);
-        renderTopPromoBoard(topMetricSelect.value);
-      });
-      topMetricSelect.addEventListener("change", () => renderTopPromoBoard(topMetricSelect.value));
+    const mediaGoalSelect = document.getElementById("mediaGoalSelect");
+    if (mediaGoalSelect) {
+      renderMediaPerformance(mediaGoalSelect.value);
+      mediaGoalSelect.addEventListener("change", () => renderMediaPerformance(mediaGoalSelect.value));
     }
 
     idleState.style.display = "none";
