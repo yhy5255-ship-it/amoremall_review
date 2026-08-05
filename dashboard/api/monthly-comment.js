@@ -1,0 +1,117 @@
+"use strict";
+/*
+  Vercel serverless function backing the monthly review's "이달 캠페인 세팅 변화"
+  AI comment plus its inline follow-up chat. The payload (a handful of selected
+  new/ended campaign-group cards) is small, so unlike api/qa.js there's no need
+  for context caching - every turn (the initial comment and each follow-up)
+  resends the same small item list as system context and goes through classic
+  multi-turn contents (history + question), same generateContent surface qa.js uses.
+*/
+
+const { GoogleGenAI } = require("@google/genai");
+
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+
+const RESPONSE_SCHEMA = {
+  type: "object",
+  properties: { text: { type: "string" } },
+  required: ["text"],
+  additionalProperties: false,
+};
+
+const SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅의 캠페인 세팅(신규 추가/종료) 변화를 분석하는 보조입니다. 사용자가 두 달(A=기준월, B=비교월)을 비교해 선택한 캠페인/광고그룹의 신규 추가·종료 내역과 관련 성과 수치를 보고, 자연스러운 분석 코멘트를 작성합니다.
+
+## 원칙
+1. 매체명·캠페인명·그룹명은 반드시 데이터에 있는 문자열을 한 글자도 바꾸지 말고 그대로 사용하세요.
+2. "kind": "new" 항목은 B월에 새로 생긴 캠페인/그룹이고, "kind": "ended" 항목은 A월에는 있었지만 B월엔 없는 캠페인/그룹입니다. isNewCampaign이 true면 캠페인 자체가 이번에 처음 생긴 것이고, isEndedCampaign이 true면 캠페인 전체가 이번에 종료된 것입니다 - 이 구분을 명확히 언급하세요.
+3. 각 항목의 "spend"와 목표(goal)별 "kpis" 필드는 이미 정확히 계산·반올림되어 있는 값입니다 - 그대로 인용하세요. goal이 "매출"이면 kpis에 구매수/GMV/ROAS/CVR이, "신규가입"이면 첫구매수/첫구매CPA/회원가입수/회원가입CPA가, "트래픽"이면 클릭수/CTR/CPC가, "앱설치"면 앱설치수/CPI가 들어 있습니다. 값이 "-"인 지표는 분모가 0이라 계산할 수 없다는 뜻이니 그 지표는 언급을 생략하세요. 절대 spend나 kpis의 숫자를 스스로 다시 나누거나 계산하지 마세요.
+4. 신규 항목은 kpis를 근거로 적은 지출로 테스트 중인지 이미 규모 있게 집행 중인지, 종료 항목은 종료 직전 성과가 좋았는데 종료된 것인지 저조해서 종료된 것으로 보이는지를 언급하면 좋습니다.
+5. 데이터에 없는 이유(왜 신규로 추가했는지, 왜 종료했는지)는 추측하지 말고, kpis로 관찰되는 사실만 서술하세요.
+6. 문장은 개조식(명사형 종결: 확인, 추가, 종료, 기록 등)으로 간결하게 쓰고, 문장 앞에 불릿 기호(·,-,*)를 붙이지 마세요.
+6-1. 금액(원)이나 건수가 1,000 이상이면 반드시 천 단위 구분 쉼표(,)를 넣어 쓰세요 (예: "27360원"이 아니라 "27,360원"). items의 spend/kpis 값은 이미 쉼표가 포함된 문자열이니 그대로 옮기면 되고, mediaContext의 숫자는 쉼표 없는 원본값이니 문장에 쓸 때 직접 쉼표를 넣으세요. 퍼센트에는 쉼표를 넣지 않습니다.
+7. 처음 코멘트를 작성할 때는 2~5문장 정도로 간결하게 작성하세요.
+8. 후속 질문에 "## 같은 매체의 이번 달 전체 캠페인/그룹" 자료가 함께 제공되면, 선택 항목에 없는 캠페인·그룹의 존재 여부 확인이나 다른 캠페인과의 비교 질문에 그 목록을 근거로 답하세요 (period 필드로 A월/B월 중 어느 데이터인지 구분됩니다). 그 목록에도 없으면 그때 "데이터에서 확인할 수 없습니다"라고 답하세요. 그 자료가 없는 첫 코멘트 요청에는 선택된 항목 데이터만으로 답하세요.`;
+
+function buildSystemInstruction(payload) {
+  const { monthALabel, monthBLabel, items, mediaContext } = payload || {};
+  const parts = [
+    SYSTEM_PROMPT,
+    "",
+    `A월(기준): ${monthALabel}`,
+    `B월(비교): ${monthBLabel}`,
+    "",
+    "## 선택된 세팅 변화 항목 (spend/kpis는 이미 계산·반올림된 값)",
+    JSON.stringify(items || [], null, 2),
+  ];
+  if (Array.isArray(mediaContext) && mediaContext.length) {
+    parts.push(
+      "",
+      "## 같은 매체의 이번 달 전체 캠페인/그룹 원본 집계 (후속 질문 전용 참고 자료)",
+      JSON.stringify(mediaContext, null, 2)
+    );
+  }
+  return parts.join("\n");
+}
+
+// {role, content}[] -> Content[], same shape as api/qa.js's toContents(). The
+// very first call (no history yet) gets a fixed instruction asking for the
+// initial comment; every later call is a real follow-up question.
+function toContents(history, question) {
+  const contents = (history || []).map(h => ({
+    role: h.role === "model" ? "model" : "user",
+    parts: [{ text: String(h.content || "") }],
+  }));
+  const userText = question || "위 데이터를 바탕으로 이번 달 캠페인 세팅 변화에 대한 분석 코멘트를 작성해주세요.";
+  contents.push({ role: "user", parts: [{ text: userText }] });
+  return contents;
+}
+
+module.exports = async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    res.status(500).json({ error: "GEMINI_API_KEY가 서버에 설정되어 있지 않습니다." });
+    return;
+  }
+
+  const payload = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  if (!payload || !Array.isArray(payload.items) || !payload.items.length) {
+    res.status(400).json({ error: "items가 비어 있습니다." });
+    return;
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: toContents(payload.history, payload.question),
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: RESPONSE_SCHEMA,
+        systemInstruction: buildSystemInstruction(payload),
+      },
+    });
+    if (!response.text) throw new Error("AI 응답에서 텍스트를 찾지 못했습니다.");
+    const parsed = JSON.parse(response.text);
+    res.status(200).json(parsed);
+  } catch (err) {
+    res.status(500).json({ error: extractErrorMessage(err) });
+  }
+};
+
+// Same shape as api/qa.js's extractErrorMessage - the SDK's top-level err.message
+// is a generic wrapper; the useful text is nested in err.body or err.message itself.
+function extractErrorMessage(err) {
+  for (const raw of [err && err.body, err && err.message]) {
+    try {
+      const body = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const nested = Array.isArray(body) ? body[0] : body;
+      if (nested && nested.error && nested.error.message) return nested.error.message;
+    } catch (_) {
+      // not JSON - try the next candidate
+    }
+  }
+  return String((err && err.message) || err);
+}

@@ -175,6 +175,40 @@
     return [...m.values()];
   }
 
+  // Parallel to aggregateGroupsByDateRange but keyed on (media, campaign, group) -
+  // used by the monthly view's "이달 캠페인 세팅 변화" diff (campaignGroups, added
+  // to export_agg.py/api/refresh.js specifically for that feature).
+  function aggregateCampaignGroupsByDateRange(rows, start, end) {
+    const m = new Map();
+    for (const g of rows) {
+      if (!g.date || g.date < start || g.date > end) continue;
+      const key = [g.media, g.campaign, g.group].join("||");
+      if (!m.has(key)) m.set(key, {
+        media: g.media, rawMedia: g.rawMedia, campaign: g.campaign, group: g.group, goal: g.goal,
+        spend: 0, gmv: 0, impr: 0, click: 0, views: 0,
+        firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0,
+      });
+      const o = m.get(key);
+      o.spend += g.spend; o.gmv += g.gmv; o.impr += g.impr; o.click += g.click; o.views += (g.views || 0);
+      o.firstPurchase += g.firstPurchase; o.signup += g.signup;
+      o.install += g.install; o.purchaseConv += g.purchaseConv;
+    }
+    return [...m.values()];
+  }
+
+  // Monthly view compares two whole calendar months (each month tab, e.g. "2607",
+  // IS one calendar month) rather than an arbitrary date range - this derives the
+  // 1일~말일 bounds for a tab key so the same date-range aggregators above can be reused.
+  function monthTabDateRange(tabKey) {
+    const yy = tabKey.slice(0, 2), mm = tabKey.slice(2, 4);
+    const year = 2000 + parseInt(yy, 10), month = parseInt(mm, 10);
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return { start: `${year}-${mm}-01`, end: `${year}-${mm}-${String(lastDay).padStart(2, "0")}` };
+  }
+  function monthTabLabel(tabKey) {
+    return `${2000 + parseInt(tabKey.slice(0, 2), 10)}년 ${parseInt(tabKey.slice(2, 4), 10)}월`;
+  }
+
   function shiftDate(dateStr, deltaDays) {
     const d = new Date(dateStr + "T00:00:00Z");
     d.setUTCDate(d.getUTCDate() + deltaDays);
@@ -363,6 +397,14 @@
     if (valA !== 0) pct = `${d >= 0 ? "+" : ""}${Math.round((d / valA) * 100)}%`;
     else if (valB !== 0) pct = "신규";
     return { cls, arrow, pct };
+  }
+
+  // Generic "A값 → B값 (▲/▼증감%)" table cell, built on deltaMeta - used by the
+  // monthly promo-compare table (and reusable anywhere else an A/B table cell is needed).
+  function abCellHtml(valA, valB, fmt) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB);
+    const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
+    return `${fmt(valA)} → ${fmt(valB)}${pctText}`;
   }
 
   // headline metric (GMV/ROAS): big current value + small "이전 A값 (증감)" line underneath
@@ -1056,6 +1098,776 @@
     localStorage.setItem(noteKeyFor(weekBLabel), text);
   }
 
+  // ---------- view mode (weekly report / monthly review) ----------
+  let viewMode = "weekly"; // 'weekly' | 'monthly' - NOT the same thing as tabSelect's month "탭"s
+  let monthlyState = null; // {tabA, tabB, labelA, labelB, rangeA, rangeB, groupsA/B, campaignGroupsA/B, promoGroupsARaw/BRaw}
+
+  const viewModeWeeklyBtn = document.getElementById("viewModeWeeklyBtn");
+  const viewModeMonthlyBtn = document.getElementById("viewModeMonthlyBtn");
+  const weeklyRail = document.getElementById("weeklyRail");
+  const monthlyRail = document.getElementById("monthlyRail");
+  const weeklyMain = document.getElementById("weeklyMain");
+  const monthlyMain = document.getElementById("monthlyMain");
+  const monthASelect = document.getElementById("monthASelect");
+  const monthBSelect = document.getElementById("monthBSelect");
+  const monthlyRunBtn = document.getElementById("monthlyRunBtn");
+  const monthlyIdleState = document.getElementById("monthlyIdleState");
+  const monthlyReportState = document.getElementById("monthlyReportState");
+  const monthlySectionsEl = document.getElementById("monthlySections");
+
+  function setViewMode(mode) {
+    viewMode = mode;
+    viewModeWeeklyBtn.classList.toggle("active", mode === "weekly");
+    viewModeWeeklyBtn.setAttribute("aria-selected", String(mode === "weekly"));
+    viewModeMonthlyBtn.classList.toggle("active", mode === "monthly");
+    viewModeMonthlyBtn.setAttribute("aria-selected", String(mode === "monthly"));
+    weeklyRail.style.display = mode === "weekly" ? "" : "none";
+    monthlyRail.style.display = mode === "monthly" ? "" : "none";
+    weeklyMain.style.display = mode === "weekly" ? "" : "none";
+    monthlyMain.style.display = mode === "monthly" ? "" : "none";
+  }
+
+  function populateMonthSelects() {
+    const tabs = Object.keys(DATA.tabs).sort();
+    const opts = tabs.map(t => `<option value="${esc(t)}">${esc(monthTabLabel(t))}</option>`).join("");
+    const prevA = monthASelect.value, prevB = monthBSelect.value;
+    monthASelect.innerHTML = opts;
+    monthBSelect.innerHTML = opts;
+    if (tabs.includes(prevA)) monthASelect.value = prevA;
+    else if (tabs.length >= 2) monthASelect.value = tabs[tabs.length - 2];
+    else if (tabs.length) monthASelect.value = tabs[0];
+    if (tabs.includes(prevB)) monthBSelect.value = prevB;
+    else if (tabs.length) monthBSelect.value = tabs[tabs.length - 1];
+    monthlyRunBtn.disabled = !tabs.length;
+  }
+
+  // Prepares the A/B month data pool that sections 3-6 render from.
+  function runMonthlyAnalysis() {
+    const tabA = monthASelect.value, tabB = monthBSelect.value;
+    if (!tabA || !tabB) { alert("비교할 두 달을 선택하세요."); return; }
+    const rangeA = monthTabDateRange(tabA), rangeB = monthTabDateRange(tabB);
+    const dataA = DATA.tabs[tabA] || {}, dataB = DATA.tabs[tabB] || {};
+
+    monthlyState = {
+      tabA, tabB, rangeA, rangeB, labelA: monthTabLabel(tabA), labelB: monthTabLabel(tabB),
+      groupsA: aggregateGroupsByDateRange(dataA.groups || [], rangeA.start, rangeA.end),
+      groupsB: aggregateGroupsByDateRange(dataB.groups || [], rangeB.start, rangeB.end),
+      // day-level, NOT aggregated across dates - section 4's weekly GMV/ROAS chart and
+      // media share need each row kept separate, unlike groupsA/B above.
+      groupsARaw: (dataA.groups || []).filter(g => g.date >= rangeA.start && g.date <= rangeA.end),
+      groupsBRaw: (dataB.groups || []).filter(g => g.date >= rangeB.start && g.date <= rangeB.end),
+      // export_agg.py's per-tab week list (already chronologically sorted) - section 4's
+      // weekly chart buckets by this same "주차" convention, not a generic Mon-Sun week.
+      weeksA: dataA.weeks || [], weeksB: dataB.weeks || [],
+      campaignGroupsA: aggregateCampaignGroupsByDateRange(dataA.campaignGroups || [], rangeA.start, rangeA.end),
+      campaignGroupsB: aggregateCampaignGroupsByDateRange(dataB.campaignGroups || [], rangeB.start, rangeB.end),
+      promoGroupsARaw: (dataA.promoGroups || []).filter(p => p.date >= rangeA.start && p.date <= rangeA.end),
+      promoGroupsBRaw: (dataB.promoGroups || []).filter(p => p.date >= rangeB.start && p.date <= rangeB.end),
+    };
+
+    document.getElementById("monthlyLabelA").textContent = monthlyState.labelA;
+    document.getElementById("monthlyLabelB").textContent = monthlyState.labelB;
+    monthlyIdleState.style.display = "none";
+    monthlyReportState.style.display = "block";
+    monthlySectionsEl.innerHTML = buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
+  }
+
+  // ---------- section 3: 이달 캠페인 세팅 변화 (campaign/group setting diff) ----------
+  let settingDiffState = null; // {newCards, endedCards} - card index -> card, read back when gathering checked selections
+  let settingDiffChat = null; // {items, history:[{role,content}]} for the follow-up mini chat, null until a comment is generated
+
+  function settingDiffKeyOf(g) { return `${g.media}||${g.campaign}||${g.group}`; }
+  function settingDiffCampaignKeyOf(g) { return `${g.media}||${g.campaign}`; }
+  function settingDiffCardSpend(card) { return card.groups.reduce((s, g) => s + (g.spend || 0), 0); }
+
+  // K_KPF(카카오 플러스친구)/Google AC/Google ACe rotate in a brand-new ad group
+  // every week by design, so every monthly diff would otherwise be dominated by
+  // dozens of "new/ended group" cards from these three alone that carry no real
+  // setting-change signal. Filtered by rawMedia (raw "매체" column B) since it's
+  // the only field that still distinguishes them - the canonical "media" field
+  // they collapse into (Kakaomoment/Google) is shared with real, meaningful campaigns.
+  const SETTING_DIFF_EXCLUDED_RAW_MEDIA = ["K_KPF", "Google AC", "Google ACe"];
+
+  // B-only combos -> "신규 추가", A-only combos -> "그룹 종료", both grouped by
+  // (media, campaign) so a campaign with several new/ended groups gets one card,
+  // not one per group. isNewCampaign/isEndedCampaign flags whether the WHOLE
+  // campaign is new/gone, not just some of its groups.
+  function computeCampaignSettingDiff(campaignGroupsA, campaignGroupsB) {
+    const keep = g => !SETTING_DIFF_EXCLUDED_RAW_MEDIA.includes(g.rawMedia);
+    campaignGroupsA = campaignGroupsA.filter(keep);
+    campaignGroupsB = campaignGroupsB.filter(keep);
+    const mapA = new Map(campaignGroupsA.map(g => [settingDiffKeyOf(g), g]));
+    const mapB = new Map(campaignGroupsB.map(g => [settingDiffKeyOf(g), g]));
+    const campaignsInA = new Set(campaignGroupsA.map(settingDiffCampaignKeyOf));
+    const campaignsInB = new Set(campaignGroupsB.map(settingDiffCampaignKeyOf));
+
+    const newByCampaign = new Map();
+    for (const g of campaignGroupsB) {
+      if (mapA.has(settingDiffKeyOf(g))) continue;
+      const ck = settingDiffCampaignKeyOf(g);
+      if (!newByCampaign.has(ck)) newByCampaign.set(ck, { media: g.media, campaign: g.campaign, isNewCampaign: !campaignsInA.has(ck), groups: [] });
+      newByCampaign.get(ck).groups.push(g);
+    }
+    const endedByCampaign = new Map();
+    for (const g of campaignGroupsA) {
+      if (mapB.has(settingDiffKeyOf(g))) continue;
+      const ck = settingDiffCampaignKeyOf(g);
+      if (!endedByCampaign.has(ck)) endedByCampaign.set(ck, { media: g.media, campaign: g.campaign, isEndedCampaign: !campaignsInB.has(ck), groups: [] });
+      endedByCampaign.get(ck).groups.push(g);
+    }
+    return {
+      newCards: [...newByCampaign.values()].sort((a, b) => settingDiffCardSpend(b) - settingDiffCardSpend(a)),
+      endedCards: [...endedByCampaign.values()].sort((a, b) => settingDiffCardSpend(b) - settingDiffCardSpend(a)),
+    };
+  }
+
+  // Raw (unformatted) aggregate across a card's groups - the shared source both the
+  // card's displayed KPI snippet and the chart-building step compute from.
+  function settingDiffCardAgg(card) {
+    return card.groups.reduce((acc, g) => {
+      acc.spend += g.spend || 0; acc.gmv += g.gmv || 0; acc.impr += g.impr || 0; acc.click += g.click || 0;
+      acc.firstPurchase += g.firstPurchase || 0; acc.signup += g.signup || 0;
+      acc.install += g.install || 0; acc.purchaseConv += g.purchaseConv || 0;
+      return acc;
+    }, { spend: 0, gmv: 0, impr: 0, click: 0, firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0 });
+  }
+
+  // Which KPI set to show depends on the campaign's goal - reused for both the
+  // card's displayed snippet and the AI comment payload, so the AI is handed the
+  // exact same already-rounded values a person reads on screen (never raw counters
+  // to divide itself - same "precompute, don't make the model do math" convention
+  // used everywhere else in this codebase, e.g. Q&A's totals/roundForPrompt).
+  function settingDiffKpiSet(goal, agg) {
+    if (goal === "신규가입") return [
+      { label: "첫구매수", value: fmtCount(agg.firstPurchase) },
+      { label: "첫구매CPA", value: agg.firstPurchase > 0 ? fmtWon(agg.spend / agg.firstPurchase) : "-" },
+      { label: "회원가입수", value: fmtCount(agg.signup) },
+      { label: "회원가입CPA", value: agg.signup > 0 ? fmtWon(agg.spend / agg.signup) : "-" },
+    ];
+    if (goal === "트래픽") return [
+      { label: "클릭수", value: fmtCount(agg.click) },
+      { label: "CTR", value: agg.impr > 0 ? fmtPct2(ctr_(agg.click, agg.impr)) : "-" },
+      { label: "CPC", value: agg.click > 0 ? fmtWon(cpc_(agg.spend, agg.click)) : "-" },
+    ];
+    if (goal === "앱설치") return [
+      { label: "앱설치수", value: fmtCount(agg.install) },
+      { label: "CPI", value: agg.install > 0 ? fmtWon(cpi_(agg.spend, agg.install)) : "-" },
+    ];
+    return [ // 매출 (기본값)
+      { label: "구매수", value: fmtCount(agg.purchaseConv) },
+      { label: "GMV", value: fmtWonAbbrev(agg.gmv) },
+      { label: "ROAS", value: agg.spend > 0 ? fmtPct(roas(agg.gmv, agg.spend)) : "-" },
+      { label: "CVR", value: agg.click > 0 ? fmtPct2(agg.purchaseConv / agg.click * 100) : "-" },
+    ];
+  }
+
+  function settingDiffCardHtml(card, kind, idx) {
+    const goal = (card.groups[0] || {}).goal || "";
+    const agg = settingDiffCardAgg(card);
+    const kpiText = settingDiffKpiSet(goal, agg).map(k => `${k.label} ${k.value}`).join(" · ");
+    const campaignTag = kind === "new"
+      ? (card.isNewCampaign ? `<span class="status-chip">신규 캠페인</span>` : "")
+      : (card.isEndedCampaign ? `<span class="status-chip">캠페인 종료</span>` : "");
+    const groupChips = card.groups.map(g => `<code>${esc(g.group)}</code>`).join(" ");
+    return `<label class="diff-card">
+      <input type="checkbox" class="diff-checkbox" data-kind="${kind}" data-idx="${idx}">
+      <div class="diff-card-body">
+        <div class="diff-card-head"><b>${esc(card.media)} · ${esc(card.campaign)}</b>${campaignTag}</div>
+        <div class="diff-card-groups">${groupChips}</div>
+        <div class="diff-card-perf">지출 ${fmtWon(agg.spend)} · ${kpiText}</div>
+      </div>
+    </label>`;
+  }
+
+  function buildSettingDiffSection(state) {
+    const { newCards, endedCards } = computeCampaignSettingDiff(state.campaignGroupsA, state.campaignGroupsB);
+    settingDiffState = { newCards, endedCards };
+    settingDiffChat = null;
+
+    const newHtml = newCards.length
+      ? newCards.map((c, i) => settingDiffCardHtml(c, "new", i)).join("")
+      : `<p class="empty-note">신규 추가된 캠페인/그룹이 없습니다.</p>`;
+    const endedHtml = endedCards.length
+      ? endedCards.map((c, i) => settingDiffCardHtml(c, "ended", i)).join("")
+      : `<p class="empty-note">종료된 캠페인/그룹이 없습니다.</p>`;
+
+    return `<section class="section-card" data-ch="SETTING_DIFF">
+      <div class="section-title"><span class="tag">SETTING</span><h3>이달 캠페인 세팅 변화</h3></div>
+      <p class="subhead">신규 추가</p>
+      <div class="diff-card-list">${newHtml}</div>
+      <p class="subhead">그룹 종료</p>
+      <div class="diff-card-list">${endedHtml}</div>
+      <div class="diff-actions">
+        <button type="button" class="run-btn" id="settingDiffCommentBtn" disabled>선택한 변화 코멘트 생성</button>
+      </div>
+      <div id="settingDiffCommentBody"></div>
+    </section>`;
+  }
+
+  // items carry BOTH a `raw` numeric aggregate (chart-building, client-only) and
+  // pre-formatted `spend`/`kpis` strings (sent to the AI) - stripped of `raw` right
+  // before the POST body is built, so the model only ever sees ready-to-cite values.
+  function gatherSelectedDiffItems() {
+    if (!settingDiffState) return [];
+    return [...document.querySelectorAll(".diff-checkbox:checked")].map(cb => {
+      const kind = cb.dataset.kind;
+      const card = (kind === "new" ? settingDiffState.newCards : settingDiffState.endedCards)[Number(cb.dataset.idx)];
+      const goal = (card.groups[0] || {}).goal || "";
+      const raw = settingDiffCardAgg(card);
+      const kpis = {};
+      for (const k of settingDiffKpiSet(goal, raw)) kpis[k.label] = k.value;
+      return {
+        kind, media: card.media, campaign: card.campaign, goal,
+        isNewCampaign: !!card.isNewCampaign, isEndedCampaign: !!card.isEndedCampaign,
+        groupNames: card.groups.map(g => g.group),
+        spend: fmtWon(raw.spend), kpis, raw,
+      };
+    });
+  }
+
+  async function generateSettingDiffComment() {
+    const items = gatherSelectedDiffItems();
+    if (!items.length) return;
+    const btn = document.getElementById("settingDiffCommentBtn");
+    const bodyEl = document.getElementById("settingDiffCommentBody");
+    btn.disabled = true;
+    bodyEl.innerHTML = commentLoadingHtml();
+    const itemsForApi = items.map(({ raw, ...rest }) => rest);
+    try {
+      const res = await fetch("/api/monthly-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB, items: itemsForApi }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      settingDiffChat = { items: itemsForApi, history: [{ role: "model", content: body.text }] };
+      bodyEl.innerHTML = settingDiffCommentHtml(body.text);
+      renderSettingDiffPerfTable(items);
+    } catch (err) {
+      bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Shared by every monthly-review "코멘트 + 후속 질문" block (section 3's setting-diff,
+  // section 4's promo analysis) - idPrefix keeps each instance's element ids distinct.
+  function inlineFollowupHtml(idPrefix, placeholder) {
+    return `
+      <button type="button" class="retry-btn" id="${idPrefix}Toggle">이 코멘트에 대해 더 물어보기</button>
+      <div id="${idPrefix}Panel" class="inline-chat" style="display:none;">
+        <div id="${idPrefix}History" class="inline-chat-history"></div>
+        <form id="${idPrefix}Form" class="inline-chat-form">
+          <textarea id="${idPrefix}Input" rows="2" placeholder="${esc(placeholder)}"></textarea>
+          <button type="submit" class="qa-send-btn">전송</button>
+        </form>
+      </div>`;
+  }
+
+  function settingDiffCommentHtml(text) {
+    return `
+      <div class="comment"><p>${esc(text).replace(/\n/g, "<br>")}</p></div>
+      <div id="settingDiffPerfTable"></div>
+      ${inlineFollowupHtml("settingDiffFollowup", "예: 이 중 지출이 가장 큰 신규 캠페인은?")}`;
+  }
+
+  // One performance table per goal present among the selected items ("유연성 있게" -
+  // the columns adapt to whichever goal(s) the comment covers), reusing each item's
+  // already-computed `kpis` object directly instead of recomputing anything.
+  function renderSettingDiffPerfTable(items) {
+    const container = document.getElementById("settingDiffPerfTable");
+    if (!container) return;
+    const byGoal = new Map();
+    for (const it of items) {
+      if (!byGoal.has(it.goal)) byGoal.set(it.goal, []);
+      byGoal.get(it.goal).push(it);
+    }
+    container.innerHTML = [...byGoal.entries()].map(([goal, goalItems]) => {
+      const kpiLabels = Object.keys(goalItems[0].kpis);
+      const head = `<tr><th>매체 · 캠페인</th><th>지출</th>${kpiLabels.map(l => `<th>${esc(l)}</th>`).join("")}</tr>`;
+      const rows = goalItems.map(it => `<tr>
+        <td>${esc(it.media)} · ${esc(it.campaign)}</td>
+        <td>${esc(it.spend)}</td>
+        ${kpiLabels.map(l => `<td>${esc(it.kpis[l])}</td>`).join("")}
+      </tr>`).join("");
+      return `<div class="perf-table-block">
+        <p class="subhead">${esc(goal)} 지표</p>
+        <div class="table-wrap"><table class="detail-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>
+      </div>`;
+    }).join("");
+  }
+
+  // The initial comment only ever sees the checked cards - fine for "analyze what I
+  // picked", but a follow-up like "다른 캠페인이랑 비교하면?" or "X 캠페인 있어?" needs
+  // more than that. Widened here (not on the initial call) to the full month's raw
+  // campaignGroups rows for whichever media the checked items belong to, so sibling
+  // campaigns under the same media - selected or not, changed or not - are answerable.
+  function settingDiffMediaContext() {
+    if (!settingDiffChat || !monthlyState) return [];
+    const relatedMedia = new Set(settingDiffChat.items.map(it => it.media));
+    const rowsA = monthlyState.campaignGroupsA.map(g => ({ ...g, period: monthlyState.labelA }));
+    const rowsB = monthlyState.campaignGroupsB.map(g => ({ ...g, period: monthlyState.labelB }));
+    return [...rowsA, ...rowsB]
+      .filter(g => relatedMedia.has(g.media) && !SETTING_DIFF_EXCLUDED_RAW_MEDIA.includes(g.rawMedia))
+      .map(g => ({
+        period: g.period, media: g.media, campaign: g.campaign, group: g.group, goal: g.goal,
+        spend: Math.round(g.spend), gmv: Math.round(g.gmv), impr: Math.round(g.impr), click: Math.round(g.click),
+        firstPurchase: Math.round(g.firstPurchase), signup: Math.round(g.signup),
+        install: Math.round(g.install), purchaseConv: Math.round(g.purchaseConv),
+      }));
+  }
+
+  async function submitSettingDiffFollowup(question) {
+    if (!settingDiffChat) return;
+    const historyEl = document.getElementById("settingDiffFollowupHistory");
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    settingDiffChat.history.push({ role: "user", content: question });
+    const loadingId = "sdf-loading-" + Math.random().toString(36).slice(2);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    try {
+      const res = await fetch("/api/monthly-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB,
+          items: settingDiffChat.items, question, history: settingDiffChat.history.slice(0, -1),
+          mediaContext: settingDiffMediaContext(),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${esc(body.text).replace(/\n/g, "<br>")}</div>`;
+      settingDiffChat.history.push({ role: "model", content: body.text });
+    } catch (err) {
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
+  }
+
+  // ---------- section 4: 특정 기획전 성과 분석 (search + weekly metric-picker chart + media donut + compare table) ----------
+  let promoAnalysisState = null; // {rowsA, rowsB, weeksA, weeksB, searchIndex}
+  let promoSelections = []; // [{id, brand, promo}], in selection order
+  let promoSelectionSeq = 0; // monotonic - stays stable across re-renders even if an earlier selection is removed
+  let promoBlockState = {}; // id -> {weeklyA, weeklyB, chartMetrics:{bar,line}, donutMetric, mediaShare, chat, chartInstances}
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  // Selectable metrics for the weekly chart's bar/line axes - both dropdowns share
+  // this same pool, so either axis can show any of the 10.
+  const PROMO_METRIC_OPTIONS = [
+    { key: "gmv", label: "GMV", fmt: fmtWonAbbrev },
+    { key: "roas", label: "ROAS", fmt: fmtPct },
+    { key: "cvr", label: "CVR", fmt: fmtPct2 },
+    { key: "ctr", label: "CTR", fmt: fmtPct2 },
+    { key: "cpc", label: "CPC", fmt: fmtWon },
+    { key: "cpi", label: "CPI", fmt: fmtWon },
+    { key: "firstPurchase", label: "첫구매수", fmt: fmtCount },
+    { key: "firstPurchaseCpa", label: "첫구매CPA", fmt: fmtWon },
+    { key: "signup", label: "회원가입수", fmt: fmtCount },
+    { key: "signupCpa", label: "회원가입CPA", fmt: fmtWon },
+  ];
+  // Selectable metrics for the media-share donut - "지출" stays the default (matches
+  // the section's original behavior) with 6 more added alongside it.
+  const PROMO_DONUT_METRICS = [
+    { key: "spend", label: "지출", fmt: fmtWon },
+    { key: "gmv", label: "GMV", fmt: fmtWon },
+    { key: "firstPurchase", label: "첫구매수", fmt: fmtCount },
+    { key: "signup", label: "회원가입수", fmt: fmtCount },
+    { key: "install", label: "앱설치수", fmt: fmtCount },
+    { key: "click", label: "클릭수", fmt: fmtCount },
+    { key: "impr", label: "노출수", fmt: fmtCount },
+  ];
+
+  // brand+promo, not promo alone - the same promo name can exist under different
+  // brands (an existing rule in this codebase, e.g. the weekly AI comment's
+  // "브랜드가 다르면 기획전명이 같아도 서로 다른 캠페인" instruction), so search
+  // results and selection both key on the pair to avoid picking the wrong one.
+  function buildPromoSearchIndex(rowsA, rowsB) {
+    const seen = new Map();
+    for (const g of [...rowsA, ...rowsB]) {
+      if (!g.promo) continue;
+      const key = `${g.brand}||${g.promo}`;
+      if (!seen.has(key)) seen.set(key, { brand: g.brand, promo: g.promo });
+    }
+    return [...seen.values()].sort((a, b) => a.promo.localeCompare(b.promo, "ko"));
+  }
+
+  function buildPromoAnalysisSection(state) {
+    promoAnalysisState = {
+      rowsA: state.groupsARaw, rowsB: state.groupsBRaw, weeksA: state.weeksA, weeksB: state.weeksB,
+      searchIndex: buildPromoSearchIndex(state.groupsARaw, state.groupsBRaw),
+    };
+    promoSelections = [];
+    promoSelectionSeq = 0;
+    promoBlockState = {};
+    return `<section class="section-card" data-ch="PROMO">
+      <div class="section-title"><span class="tag">PROMO</span><h3>특정 기획전 성과 분석</h3></div>
+      <div class="field promo-search-field">
+        <input type="text" id="promoSearchInput" placeholder="기획전명 또는 브랜드명을 입력하세요 (예: 1만원이상_시즌, 헤라) - 여러 개 선택 가능" autocomplete="off">
+        <div id="promoSearchResults" class="promo-search-results" style="display:none;"></div>
+      </div>
+      <div id="promoSelectedChips" class="promo-chip-row"></div>
+      <div id="promoAnalysisBody"><p class="empty-note">기획전을 검색해서 선택하면 분석이 표시됩니다. 여러 개를 선택할 수 있습니다.</p></div>
+    </section>`;
+  }
+
+  function renderPromoSearchResults(query) {
+    const resultsEl = document.getElementById("promoSearchResults");
+    if (!resultsEl || !promoAnalysisState) return;
+    const q = query.trim().toLowerCase();
+    if (!q) { resultsEl.style.display = "none"; resultsEl.innerHTML = ""; return; }
+    const matches = promoAnalysisState.searchIndex
+      .filter(p => p.promo.toLowerCase().includes(q) || (p.brand && p.brand.toLowerCase().includes(q)))
+      .slice(0, 20);
+    resultsEl.innerHTML = matches.length
+      ? matches.map(p => `<div class="promo-search-item" data-brand="${esc(p.brand)}" data-promo="${esc(p.promo)}">${esc(p.brand)} · ${esc(p.promo)}</div>`).join("")
+      : `<div class="promo-search-item promo-search-empty">일치하는 기획전/브랜드가 없습니다.</div>`;
+    resultsEl.style.display = "block";
+  }
+
+  function addPromoSelection(brand, promo) {
+    if (!promoSelections.some(p => p.brand === brand && p.promo === promo)) {
+      promoSelections.push({ id: promoSelectionSeq++, brand, promo });
+      renderPromoAnalysisList();
+    }
+    const input = document.getElementById("promoSearchInput");
+    const results = document.getElementById("promoSearchResults");
+    if (input) input.value = "";
+    if (results) results.style.display = "none";
+  }
+
+  function removePromoSelection(id) {
+    const st = promoBlockState[id];
+    if (st) st.chartInstances.forEach(c => c.destroy());
+    delete promoBlockState[id];
+    promoSelections = promoSelections.filter(p => p.id !== id);
+    renderPromoAnalysisList();
+  }
+
+  // Buckets by the sheet's own "주차" convention (weekLabel), not a generic Mon-Sun
+  // week, matching how the rest of this dashboard already talks about weeks. Every
+  // week in weeksMeta gets a row (0-filled when the promo had no activity that week)
+  // so gaps/start/end still show, same reasoning the old daily fill used.
+  function buildWeeklySeries(rows, weeksMeta, brand, promo) {
+    const byWeek = new Map();
+    for (const w of weeksMeta) {
+      byWeek.set(w.label, { label: w.label, start: w.start, end: w.end, spend: 0, gmv: 0, impr: 0, click: 0, firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0 });
+    }
+    for (const g of rows) {
+      if (g.brand !== brand || g.promo !== promo) continue;
+      const bucket = byWeek.get(g.weekLabel);
+      if (!bucket) continue;
+      bucket.spend += g.spend || 0; bucket.gmv += g.gmv || 0; bucket.impr += g.impr || 0; bucket.click += g.click || 0;
+      bucket.firstPurchase += g.firstPurchase || 0; bucket.signup += g.signup || 0;
+      bucket.install += g.install || 0; bucket.purchaseConv += g.purchaseConv || 0;
+    }
+    return [...byWeek.values()];
+  }
+
+  // All 10 PROMO_METRIC_OPTIONS values for one week bucket, precomputed once so
+  // switching the bar/line dropdown never re-derives anything from raw sums again.
+  function computePromoWeekMetrics(w) {
+    return {
+      gmv: Math.round(w.gmv),
+      roas: w.spend > 0 ? Math.round(roas(w.gmv, w.spend)) : null,
+      cvr: w.click > 0 ? Math.round((w.purchaseConv / w.click * 100) * 100) / 100 : null,
+      ctr: w.impr > 0 ? Math.round(ctr_(w.click, w.impr) * 100) / 100 : null,
+      cpc: w.click > 0 ? Math.round(cpc_(w.spend, w.click)) : null,
+      cpi: w.install > 0 ? Math.round(cpi_(w.spend, w.install)) : null,
+      firstPurchase: Math.round(w.firstPurchase),
+      firstPurchaseCpa: w.firstPurchase > 0 ? Math.round(w.spend / w.firstPurchase) : null,
+      signup: Math.round(w.signup),
+      signupCpa: w.signup > 0 ? Math.round(w.spend / w.signup) : null,
+    };
+  }
+
+  function computePromoMediaShare(rowsA, rowsB, brand, promo, metricKey) {
+    metricKey = metricKey || "spend";
+    const matched = [...rowsA, ...rowsB].filter(g => g.brand === brand && g.promo === promo);
+    const byMedia = groupByMedia(matched);
+    const total = byMedia.reduce((s, m) => s + (m[metricKey] || 0), 0);
+    return byMedia.filter(m => (m[metricKey] || 0) > 0).sort((a, b) => b[metricKey] - a[metricKey])
+      .map(m => ({ media: m.media, value: m[metricKey], pct: total > 0 ? (m[metricKey] / total * 100) : 0 }));
+  }
+
+  function sumWeeklyTotals(weekArr) {
+    return weekArr.reduce((acc, w) => ({
+      spend: acc.spend + w.spend, gmv: acc.gmv + w.gmv,
+      firstPurchase: acc.firstPurchase + w.firstPurchase, signup: acc.signup + w.signup,
+    }), { spend: 0, gmv: 0, firstPurchase: 0, signup: 0 });
+  }
+
+  function promoBlockHtml(p) {
+    const st = promoBlockState[p.id];
+    const metricOptionsHtml = (selectedKey) => PROMO_METRIC_OPTIONS.map(m => `<option value="${m.key}"${m.key === selectedKey ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+    const donutOptionsHtml = PROMO_DONUT_METRICS.map(m => `<option value="${m.key}"${m.key === st.donutMetric ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+    return `<div class="promo-analysis-block" data-promo-id="${p.id}">
+      <div class="promo-analysis-head"><b>${esc(p.brand)} · ${esc(p.promo)}</b></div>
+      <div class="promo-charts-grid">
+        <div class="chart-block">
+          <div class="chart-controls">
+            <p class="subhead">주별 추이</p>
+            <select class="promo-metric-select top-metric-select" data-promo-id="${p.id}" data-axis="bar">${metricOptionsHtml(st.chartMetrics.bar)}</select>
+            <select class="promo-metric-select top-metric-select" data-promo-id="${p.id}" data-axis="line">${metricOptionsHtml(st.chartMetrics.line)}</select>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="promoWeeklyChart-${p.id}"></canvas></div>
+        </div>
+        <div class="chart-block">
+          <div class="chart-controls">
+            <p class="subhead">매체별 비중</p>
+            <select class="promo-donut-select top-metric-select" data-promo-id="${p.id}">${donutOptionsHtml}</select>
+          </div>
+          <div class="chart-canvas-wrap chart-canvas-wrap-donut"><canvas id="promoMediaChart-${p.id}"></canvas></div>
+        </div>
+      </div>
+      <div class="diff-actions">
+        <button type="button" class="run-btn" id="promoCommentBtn-${p.id}" data-promo-id="${p.id}">이 기획전 코멘트 생성</button>
+      </div>
+      <div id="promoCommentBody-${p.id}"></div>
+    </div>`;
+  }
+
+  function buildPromoCompareTableHtml() {
+    const rows = promoSelections.map(p => {
+      const st = promoBlockState[p.id];
+      if (!st) return null;
+      return { p, totA: sumWeeklyTotals(st.weeklyA), totB: sumWeeklyTotals(st.weeklyB) };
+    }).filter(Boolean);
+    if (!rows.length) return "";
+
+    const head = `<tr><th>기획전</th><th>지출</th><th>GMV</th><th>ROAS</th><th>첫구매수</th><th>첫구매CPA</th><th>회원가입수</th><th>회원가입CPA</th></tr>`;
+    const bodyRows = rows.map(({ p, totA, totB }) => {
+      const roasA = totA.spend > 0 ? roas(totA.gmv, totA.spend) : 0;
+      const roasB = totB.spend > 0 ? roas(totB.gmv, totB.spend) : 0;
+      const fpCpaCell = (totA.firstPurchase > 0 && totB.firstPurchase > 0)
+        ? abCellHtml(totA.spend / totA.firstPurchase, totB.spend / totB.firstPurchase, fmtWon)
+        : `<span class="cell-na">-</span>`;
+      const suCpaCell = (totA.signup > 0 && totB.signup > 0)
+        ? abCellHtml(totA.spend / totA.signup, totB.spend / totB.signup, fmtWon)
+        : `<span class="cell-na">-</span>`;
+      return `<tr>
+        <td>${esc(p.brand)} · ${esc(p.promo)}</td>
+        <td>${abCellHtml(totA.spend, totB.spend, fmtWon)}</td>
+        <td>${abCellHtml(totA.gmv, totB.gmv, fmtWonAbbrev)}</td>
+        <td>${abCellHtml(roasA, roasB, fmtPct)}</td>
+        <td>${abCellHtml(totA.firstPurchase, totB.firstPurchase, fmtCount)}</td>
+        <td>${fpCpaCell}</td>
+        <td>${abCellHtml(totA.signup, totB.signup, fmtCount)}</td>
+        <td>${suCpaCell}</td>
+      </tr>`;
+    }).join("");
+
+    return `<div class="perf-table-block">
+      <p class="subhead">기획전 비교</p>
+      <div class="table-wrap"><table class="detail-table"><thead>${head}</thead><tbody>${bodyRows}</tbody></table></div>
+    </div>`;
+  }
+
+  // Rebuilds the whole selected-promo list from scratch on every add/remove, but
+  // SKIPS recompute for ids already in promoBlockState - otherwise adding a 2nd promo
+  // would blow away the 1st promo's dropdown choices and any already-generated comment.
+  function renderPromoAnalysisList() {
+    const chipsEl = document.getElementById("promoSelectedChips");
+    const bodyEl = document.getElementById("promoAnalysisBody");
+    if (!chipsEl || !bodyEl || !promoAnalysisState) return;
+
+    chipsEl.innerHTML = promoSelections.map(p => `<span class="promo-chip">${esc(p.brand)} · ${esc(p.promo)}<button type="button" class="promo-chip-remove" data-remove-id="${p.id}" aria-label="선택 해제">×</button></span>`).join("");
+
+    if (!promoSelections.length) {
+      bodyEl.innerHTML = `<p class="empty-note">기획전을 검색해서 선택하면 분석이 표시됩니다. 여러 개를 선택할 수 있습니다.</p>`;
+      return;
+    }
+
+    const { rowsA, rowsB, weeksA, weeksB } = promoAnalysisState;
+    for (const p of promoSelections) {
+      if (promoBlockState[p.id]) continue;
+      promoBlockState[p.id] = {
+        weeklyA: buildWeeklySeries(rowsA, weeksA, p.brand, p.promo),
+        weeklyB: buildWeeklySeries(rowsB, weeksB, p.brand, p.promo),
+        chartMetrics: { bar: "gmv", line: "roas" }, donutMetric: "spend",
+        mediaShare: computePromoMediaShare(rowsA, rowsB, p.brand, p.promo, "spend"),
+        chat: null, chartInstances: [],
+      };
+    }
+
+    bodyEl.innerHTML = (promoSelections.length >= 2 ? buildPromoCompareTableHtml() : "") + promoSelections.map(promoBlockHtml).join("");
+    for (const p of promoSelections) {
+      renderPromoCharts(p.id);
+      renderPromoCommentArea(p.id);
+    }
+  }
+
+  function renderPromoCharts(id) {
+    const st = promoBlockState[id];
+    if (!st) return;
+    st.chartInstances.forEach(c => c.destroy());
+    st.chartInstances = [];
+    if (typeof Chart === "undefined") return;
+
+    const ink = cssVar("--ink-soft") || "#6C6960";
+    const accent = cssVar("--accent") || "#57524A";
+    const border = cssVar("--border") || "#DDDAD2";
+    const surface = cssVar("--surface") || "#FFFFFF";
+    const donutPalette = ["--ink", "--accent", "--accent-2", "--accent-3", "--accent-4", "--ink-soft", "--border"]
+      .map(v => cssVar(v)).filter(Boolean);
+    Chart.defaults.color = ink;
+    Chart.defaults.font.family = cssVar("--font-kr") || undefined;
+
+    const weekly = [...st.weeklyA, ...st.weeklyB];
+    const weeklyCanvas = document.getElementById(`promoWeeklyChart-${id}`);
+    if (weeklyCanvas) {
+      const perWeek = weekly.map(computePromoWeekMetrics);
+      const barSpec = PROMO_METRIC_OPTIONS.find(m => m.key === st.chartMetrics.bar);
+      const lineSpec = PROMO_METRIC_OPTIONS.find(m => m.key === st.chartMetrics.line);
+      st.chartInstances.push(new Chart(weeklyCanvas.getContext("2d"), {
+        data: {
+          labels: weekly.map(w => w.label),
+          datasets: [
+            { type: "bar", label: barSpec.label, data: perWeek.map(m => m[barSpec.key]), backgroundColor: ink, borderRadius: 3, yAxisID: "yBar", order: 2 },
+            { type: "line", label: lineSpec.label, data: perWeek.map(m => m[lineSpec.key]), borderColor: accent, backgroundColor: accent, pointBackgroundColor: accent, yAxisID: "yLine", tension: 0.25, spanGaps: true, order: 1, pointRadius: 3 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { labels: { color: ink } },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  const spec = ctx.dataset.yAxisID === "yBar" ? barSpec : lineSpec;
+                  const v = ctx.parsed.y;
+                  return `${spec.label}: ${v == null ? "-" : spec.fmt(v)}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: ink, maxRotation: 60, minRotation: 30 }, grid: { display: false } },
+            yBar: { position: "left", ticks: { color: ink }, grid: { color: border } },
+            yLine: { position: "right", ticks: { color: ink }, grid: { display: false } },
+          },
+        },
+      }));
+    }
+
+    const mediaCanvas = document.getElementById(`promoMediaChart-${id}`);
+    if (mediaCanvas) {
+      const donutSpec = PROMO_DONUT_METRICS.find(m => m.key === st.donutMetric);
+      if (!st.mediaShare.length) {
+        mediaCanvas.closest(".chart-canvas-wrap").innerHTML = `<p class="empty-note">데이터가 없습니다.</p>`;
+      } else {
+        st.chartInstances.push(new Chart(mediaCanvas.getContext("2d"), {
+          type: "doughnut",
+          data: {
+            labels: st.mediaShare.map(m => m.media),
+            datasets: [{
+              data: st.mediaShare.map(m => m.value),
+              backgroundColor: st.mediaShare.map((_, i) => donutPalette[i % donutPalette.length]),
+              borderColor: surface, borderWidth: 2,
+            }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { position: "bottom", labels: { color: ink, boxWidth: 12, font: { size: 11 } } },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => {
+                    const m = st.mediaShare[ctx.dataIndex];
+                    return `${m.media}: ${donutSpec.fmt(m.value)} (${m.pct.toFixed(1)}%)`;
+                  },
+                },
+              },
+            },
+          },
+        }));
+      }
+    }
+  }
+
+  function buildPromoCommentPayload(brand, promo, st) {
+    const totA = sumWeeklyTotals(st.weeklyA), totB = sumWeeklyTotals(st.weeklyB);
+    return {
+      brand, promo,
+      monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB,
+      totals: {
+        spendA: Math.round(totA.spend), gmvA: Math.round(totA.gmv),
+        roasA: totA.spend > 0 ? Math.round(roas(totA.gmv, totA.spend)) : null,
+        spendB: Math.round(totB.spend), gmvB: Math.round(totB.gmv),
+        roasB: totB.spend > 0 ? Math.round(roas(totB.gmv, totB.spend)) : null,
+      },
+      weeklySeries: [...st.weeklyA, ...st.weeklyB].map(w => ({
+        week: w.label, spend: Math.round(w.spend), ...computePromoWeekMetrics(w),
+      })),
+      mediaShareMetric: PROMO_DONUT_METRICS.find(m => m.key === st.donutMetric).label,
+      mediaShare: st.mediaShare.map(m => ({ media: m.media, value: Math.round(m.value), pct: Math.round(m.pct * 10) / 10 })),
+    };
+  }
+
+  function renderPromoCommentArea(id) {
+    const st = promoBlockState[id];
+    const bodyEl = document.getElementById(`promoCommentBody-${id}`);
+    if (!st || !bodyEl || !st.chat) return;
+    bodyEl.innerHTML = `
+      <div class="comment"><p>${esc(st.chat.history[0].content).replace(/\n/g, "<br>")}</p></div>
+      ${inlineFollowupHtml(`promoFollowup${id}`, "예: 이 기획전의 매체별 성과 차이가 큰 이유는?")}`;
+    const histEl = document.getElementById(`promoFollowup${id}History`);
+    if (histEl && st.chat.history.length > 1) {
+      histEl.innerHTML = st.chat.history.slice(1)
+        .map(h => `<div class="qa-bubble ${h.role === "user" ? "user" : "model"}">${esc(h.content).replace(/\n/g, "<br>")}</div>`)
+        .join("");
+    }
+  }
+
+  async function generatePromoComment(id) {
+    const st = promoBlockState[id];
+    const sel = promoSelections.find(p => p.id === id);
+    if (!st || !sel) return;
+    const btn = document.getElementById(`promoCommentBtn-${id}`);
+    const bodyEl = document.getElementById(`promoCommentBody-${id}`);
+    btn.disabled = true;
+    bodyEl.innerHTML = commentLoadingHtml();
+    const payload = buildPromoCommentPayload(sel.brand, sel.promo, st);
+    try {
+      const res = await fetch("/api/monthly-promo-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      st.chat = { payload, history: [{ role: "model", content: body.text }] };
+      renderPromoCommentArea(id);
+    } catch (err) {
+      bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function submitPromoFollowup(id, question) {
+    const st = promoBlockState[id];
+    if (!st || !st.chat) return;
+    const historyEl = document.getElementById(`promoFollowup${id}History`);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    st.chat.history.push({ role: "user", content: question });
+    const loadingId = `pf-loading-${id}-` + Math.random().toString(36).slice(2);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    try {
+      const res = await fetch("/api/monthly-promo-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...st.chat.payload, question, history: st.chat.history.slice(0, -1) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${esc(body.text).replace(/\n/g, "<br>")}</div>`;
+      st.chat.history.push({ role: "model", content: body.text });
+    } catch (err) {
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
+  }
+
   // ---------- wiring ----------
   let DATA = null;
   let DATA_CURRENT = null; // merged raw day-level {groups, promoGroups} pool across every checked tab
@@ -1104,6 +1916,84 @@
       requestAIComments(lastPromptPayload);
     }
   });
+
+  // 이달 캠페인 세팅 변화 (section 3) - re-created on every 월간 분석 run, so wired
+  // once via delegation on the shared monthlySections container, same pattern as sectionsEl above.
+  monthlySectionsEl.addEventListener("change", (e) => {
+    if (e.target.classList.contains("diff-checkbox")) {
+      const btn = document.getElementById("settingDiffCommentBtn");
+      if (btn) btn.disabled = !document.querySelector(".diff-checkbox:checked");
+    } else if (e.target.classList.contains("promo-metric-select")) {
+      const id = Number(e.target.dataset.promoId);
+      const st = promoBlockState[id];
+      if (st) { st.chartMetrics[e.target.dataset.axis] = e.target.value; renderPromoCharts(id); }
+    } else if (e.target.classList.contains("promo-donut-select")) {
+      const id = Number(e.target.dataset.promoId);
+      const st = promoBlockState[id];
+      const sel = promoSelections.find(p => p.id === id);
+      if (st && sel) {
+        st.donutMetric = e.target.value;
+        st.mediaShare = computePromoMediaShare(promoAnalysisState.rowsA, promoAnalysisState.rowsB, sel.brand, sel.promo, st.donutMetric);
+        renderPromoCharts(id);
+      }
+    }
+  });
+  monthlySectionsEl.addEventListener("click", (e) => {
+    const searchItem = e.target.closest(".promo-search-item[data-promo]");
+    const chipRemove = e.target.closest(".promo-chip-remove[data-remove-id]");
+    const promoCommentBtn = e.target.closest("[id^='promoCommentBtn-']");
+    const promoFollowupToggleMatch = e.target.id.match(/^promoFollowup(\d+)Toggle$/);
+
+    if (e.target.id === "settingDiffCommentBtn") {
+      generateSettingDiffComment();
+    } else if (e.target.id === "settingDiffFollowupToggle") {
+      toggleInlinePanel("settingDiffFollowupPanel");
+    } else if (searchItem) {
+      addPromoSelection(searchItem.dataset.brand, searchItem.dataset.promo);
+    } else if (chipRemove) {
+      removePromoSelection(Number(chipRemove.dataset.removeId));
+    } else if (promoCommentBtn) {
+      generatePromoComment(Number(promoCommentBtn.dataset.promoId));
+    } else if (promoFollowupToggleMatch) {
+      toggleInlinePanel(`promoFollowup${promoFollowupToggleMatch[1]}Panel`);
+    }
+  });
+  monthlySectionsEl.addEventListener("input", (e) => {
+    if (e.target.id === "promoSearchInput") renderPromoSearchResults(e.target.value);
+  });
+  // Delay hiding the dropdown on blur so a click on a result item still registers first.
+  monthlySectionsEl.addEventListener("focusout", (e) => {
+    if (e.target.id !== "promoSearchInput") return;
+    setTimeout(() => {
+      const results = document.getElementById("promoSearchResults");
+      if (results) results.style.display = "none";
+    }, 150);
+  });
+  monthlySectionsEl.addEventListener("submit", (e) => {
+    if (e.target.id === "settingDiffFollowupForm") {
+      e.preventDefault();
+      submitFromInlineChat("settingDiffFollowupInput", submitSettingDiffFollowup);
+      return;
+    }
+    const m = e.target.id.match(/^promoFollowup(\d+)Form$/);
+    if (m) {
+      e.preventDefault();
+      const id = Number(m[1]);
+      submitFromInlineChat(`promoFollowup${id}Input`, (q) => submitPromoFollowup(id, q));
+    }
+  });
+
+  function toggleInlinePanel(id) {
+    const panel = document.getElementById(id);
+    if (panel) panel.style.display = panel.style.display === "none" ? "flex" : "none";
+  }
+  function submitFromInlineChat(inputId, submitFn) {
+    const input = document.getElementById(inputId);
+    const question = input.value.trim();
+    if (!question) return;
+    input.value = "";
+    submitFn(question);
+  }
 
   function getCheckedTabs() {
     return [...tabSelect.selectedOptions].map(o => o.value);
@@ -1170,6 +2060,19 @@
 
   const currentWeekBLabel = () => `${dateBStart.value}~${dateBEnd.value}`;
 
+  // data.json (Python) and /api/refresh (Node) both stamp "generatedAt" - shown here
+  // so it's clear whether the loaded snapshot is this week's Friday auto-refresh or
+  // a live in-session "데이터 최신화" click.
+  function updateLastRefreshedHint(iso) {
+    const hintEl = document.getElementById("lastRefreshedHint");
+    if (!hintEl) return;
+    if (!iso) { hintEl.textContent = ""; return; }
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) { hintEl.textContent = ""; return; }
+    const pad = (n) => String(n).padStart(2, "0");
+    hintEl.textContent = `데이터 기준: ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   // "데이터 최신화" - re-pulls the sheet via /api/refresh (a Node port of
   // scripts/export_agg.py's aggregation, see that file) and swaps it into DATA for
   // the rest of this session. Never touches the on-disk data.json - re-running the
@@ -1187,7 +2090,9 @@
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 
       DATA = body;
+      updateLastRefreshedHint(body.generatedAt);
       populateTabSelect(); // defaults every tab back to selected
+      populateMonthSelects();
       if (prevTabs.length) {
         for (const opt of tabSelect.options) opt.selected = prevTabs.includes(opt.value);
         if (!tabSelect.selectedOptions.length) for (const opt of tabSelect.options) opt.selected = true;
@@ -1277,8 +2182,13 @@
 
   function init(data) {
     DATA = data;
+    updateLastRefreshedHint(data.generatedAt);
     populateTabSelect();
     updateDateConstraints();
+    populateMonthSelects();
+    viewModeWeeklyBtn.addEventListener("click", () => setViewMode("weekly"));
+    viewModeMonthlyBtn.addEventListener("click", () => setViewMode("monthly"));
+    monthlyRunBtn.addEventListener("click", runMonthlyAnalysis);
     tabSelect.addEventListener("change", updateDateConstraints);
     for (const el of [dateAStart, dateAEnd, dateBStart, dateBEnd]) {
       el.addEventListener("change", checkDateOverlap);

@@ -23,6 +23,7 @@ import re
 import sys
 import io
 import json
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -91,6 +92,7 @@ def export_tab(tab_name):
 
     groups = {}
     promo_groups = {}
+    campaign_groups = {}
     week_labels_seen = set()
     skipped_bad_date = 0
 
@@ -176,6 +178,36 @@ def export_tab(tab_name):
         pg["install"] += install
         pg["purchaseConv"] += purchase_conv
 
+        # Campaign/group-level aggregation for the monthly "캠페인 세팅 변화" diff.
+        # Media here must be the canonical "Media" column (AN, e.g. "Google"), not the
+        # raw "매체" column (B, e.g. "Google AC"/"Google ACe"/"Google pMax") - confirmed
+        # against the live sheet that AN is what groups/promoGroups already key media on
+        # (groupByMedia, UNSUPPORTED_FP_SU_MEDIA etc. all expect the canonical names).
+        # rawMedia (B) is kept as a separate display/filter field - the setting-diff
+        # feature excludes noisy always-rotating sub-accounts (K_KPF/Google AC/Google
+        # ACe) by this raw value, since they collapse into indistinguishable canonical
+        # media once grouped.
+        ckey = (date, col("Media", r), col("캠페인이름", r), col("광고그룹 이름", r))
+        cg = campaign_groups.get(ckey)
+        if cg is None:
+            cg = {
+                "date": date, "weekLabel": week_label, "goal": goal,
+                "media": col("Media", r), "rawMedia": col("매체", r),
+                "campaign": col("캠페인이름", r), "group": col("광고그룹 이름", r),
+                "spend": 0.0, "gmv": 0.0, "impr": 0.0, "click": 0.0, "views": 0.0,
+                "firstPurchase": 0.0, "signup": 0.0, "install": 0.0, "purchaseConv": 0.0,
+            }
+            campaign_groups[ckey] = cg
+        cg["spend"] += spend
+        cg["gmv"] += gmv
+        cg["impr"] += impr
+        cg["click"] += click
+        cg["views"] += views
+        cg["firstPurchase"] += first_purchase
+        cg["signup"] += signup
+        cg["install"] += install
+        cg["purchaseConv"] += purchase_conv
+
     if skipped_bad_date:
         print(f"  {tab_name}: skipped {skipped_bad_date} row(s) with an unparseable '일' value")
 
@@ -195,6 +227,7 @@ def export_tab(tab_name):
     return {
         "tab": tab_name, "dateRange": date_range, "weeks": weeks,
         "groups": list(groups.values()), "promoGroups": list(promo_groups.values()),
+        "campaignGroups": list(campaign_groups.values()),
     }
 
 
@@ -207,15 +240,19 @@ def discover_month_tabs():
     return sorted(t for t in titles if MONTH_TAB_RE.match(t))
 
 
+KST = timezone(timedelta(hours=9))
+
+
 def main():
     tabs = discover_month_tabs()
     print("discovered month tabs:", tabs)
-    data = {"tabs": {}}
+    data = {"tabs": {}, "generatedAt": datetime.now(KST).isoformat()}
     for tab in tabs:
         tab_data = export_tab(tab)
         if tab_data:
             data["tabs"][tab] = tab_data
             print(f"{tab}: {len(tab_data['groups'])} groups, {len(tab_data['promoGroups'])} promoGroups, "
+                  f"{len(tab_data['campaignGroups'])} campaignGroups, "
                   f"dateRange={tab_data['dateRange']}, weeks={[w['label'] for w in tab_data['weeks']]}")
         else:
             print(f"{tab}: no data found (tab missing or empty?)")

@@ -102,6 +102,7 @@ function aggregateTab(tabName, rows) {
 
   const groups = new Map();
   const promoGroups = new Map();
+  const campaignGroups = new Map();
   const weekLabelsSeen = new Set();
 
   for (const r of dataRows) {
@@ -152,6 +153,23 @@ function aggregateTab(tabName, rows) {
     }
     pg.spend += spend; pg.gmv += gmv; pg.impr += impr; pg.click += click; pg.views += views;
     pg.firstPurchase += firstPurchase; pg.signup += signup; pg.install += install; pg.purchaseConv += purchaseConv;
+
+    // campaignGroups - mirrors export_agg.py's addition for the monthly "캠페인 세팅
+    // 변화" diff. rawMedia (B, e.g. "Google AC") is kept separate from the canonical
+    // media (AN) used everywhere else - see export_agg.py's comment for why.
+    const rawMedia = col("매체", r), campaign = col("캠페인이름", r), group = col("광고그룹 이름", r);
+    const ckey = [date, media, campaign, group].join("||");
+    let cg = campaignGroups.get(ckey);
+    if (!cg) {
+      cg = {
+        date, weekLabel, goal, media, rawMedia, campaign, group,
+        spend: 0, gmv: 0, impr: 0, click: 0, views: 0,
+        firstPurchase: 0, signup: 0, install: 0, purchaseConv: 0,
+      };
+      campaignGroups.set(ckey, cg);
+    }
+    cg.spend += spend; cg.gmv += gmv; cg.impr += impr; cg.click += click; cg.views += views;
+    cg.firstPurchase += firstPurchase; cg.signup += signup; cg.install += install; cg.purchaseConv += purchaseConv;
   }
 
   const groupList = [...groups.values()];
@@ -173,7 +191,10 @@ function aggregateTab(tabName, rows) {
   const allDates = groupList.map(g => g.date).sort();
   const dateRange = allDates.length ? { start: allDates[0], end: allDates[allDates.length - 1] } : { start: "", end: "" };
 
-  return { tab: tabName, dateRange, weeks, groups: groupList, promoGroups: [...promoGroups.values()] };
+  return {
+    tab: tabName, dateRange, weeks, groups: groupList,
+    promoGroups: [...promoGroups.values()], campaignGroups: [...campaignGroups.values()],
+  };
 }
 
 module.exports = async (req, res) => {
@@ -184,7 +205,7 @@ module.exports = async (req, res) => {
   try {
     const token = await getAccessToken();
     const tabs = await discoverMonthTabs(token);
-    const data = { tabs: {} };
+    const data = { tabs: {}, generatedAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Seoul" }).replace(" ", "T") + "+09:00" };
     for (const tab of tabs) {
       const values = await fetchTabValues(tab, token);
       const tabData = aggregateTab(tab, values);

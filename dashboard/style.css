@@ -52,6 +52,14 @@ body{
 }
 .brand h1{font-size:19px; margin:0; font-weight:700; text-wrap:balance;}
 
+.view-toggle{display:flex; background:var(--surface-3); border:1px solid var(--border); border-radius:8px; padding:3px; gap:2px;}
+.view-toggle-btn{
+  flex:1; background:none; border:none; border-radius:6px; padding:8px 10px;
+  font-size:12.5px; font-weight:600; color:var(--ink-soft); cursor:pointer; font-family:var(--font-kr);
+}
+.view-toggle-btn.active{background:var(--surface); color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.08);}
+.view-toggle-btn:hover:not(.active){color:var(--ink);}
+
 .field{display:flex; flex-direction:column; gap:6px;}
 .field label{font-size:12px; color:var(--ink-soft); font-weight:600; letter-spacing:.01em;}
 .step-num{
@@ -257,6 +265,74 @@ details.detail summary{cursor:pointer; font-size:12.5px; color:var(--ink-soft); 
 /* ---------- Media performance ---------- */
 .section-card[data-ch="MEDIA"]{border-left:4px solid var(--ink); background:var(--surface);}
 .section-card[data-ch="MEDIA"] .tag{background:var(--ink); color:var(--bg);}
+.subhead{font-size:11.5px; font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.03em; margin:18px 0 8px;}
+.subhead:first-of-type{margin-top:0;}
+
+/* ---------- Monthly review: 이달 캠페인 세팅 변화 ---------- */
+.section-card[data-ch="SETTING_DIFF"]{border-left:4px solid var(--ink);}
+.section-card[data-ch="SETTING_DIFF"] .tag{background:var(--ink); color:var(--bg);}
+.diff-card-list{display:flex; flex-direction:column; gap:8px;}
+.diff-card{
+  display:flex; align-items:flex-start; gap:10px; background:var(--surface-2);
+  border:1px solid var(--border); border-radius:8px; padding:11px 13px; cursor:pointer;
+}
+.diff-card:has(.diff-checkbox:checked){border-color:var(--accent); background:var(--surface-3);}
+.diff-card input[type="checkbox"]{margin-top:3px; accent-color:var(--accent); flex:none;}
+.diff-card-body{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.diff-card-head{display:flex; align-items:center; gap:8px; font-size:13px; flex-wrap:wrap;}
+.diff-card-groups{display:flex; flex-wrap:wrap; gap:5px;}
+.diff-card-groups code{
+  font-family:var(--font-mono); font-size:11px; background:var(--surface); border:1px solid var(--border);
+  border-radius:5px; padding:2px 6px; color:var(--ink);
+}
+.diff-card-perf{font-size:12px; color:var(--ink-soft); font-variant-numeric:tabular-nums;}
+.diff-actions{margin-top:14px; padding-top:14px; border-top:1px solid var(--border);}
+.diff-actions .run-btn{width:auto;}
+.perf-table-block{margin-top:14px;}
+.perf-table-block .subhead{margin-top:0;}
+.inline-chat{margin-top:14px; padding-top:14px; border-top:1px dashed var(--border); flex-direction:column; gap:10px;}
+.inline-chat-history{display:flex; flex-direction:column; gap:8px; max-height:260px; overflow-y:auto;}
+.inline-chat-form{display:flex; gap:8px;}
+.inline-chat-form textarea{
+  flex:1; resize:none; font-size:13px; padding:8px 10px; border-radius:8px;
+  font-family:var(--font-kr); background:var(--surface); color:var(--ink); border:1px solid var(--border);
+}
+
+/* ---------- Monthly review: 특정 기획전 성과 분석 ---------- */
+.section-card[data-ch="PROMO"]{border-left:4px solid var(--ink);}
+.section-card[data-ch="PROMO"] .tag{background:var(--ink); color:var(--bg);}
+.promo-search-field{position:relative; margin-bottom:16px; max-width:420px;}
+.promo-search-results{
+  position:absolute; top:100%; left:0; right:0; margin-top:4px; z-index:5;
+  background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  max-height:240px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.12);
+}
+.promo-search-item{padding:9px 12px; font-size:13px; cursor:pointer;}
+.promo-search-item:hover{background:var(--surface-2);}
+.promo-search-item + .promo-search-item{border-top:1px solid var(--border);}
+.promo-search-item.promo-search-empty{cursor:default; color:var(--ink-soft);}
+.promo-search-item.promo-search-empty:hover{background:none;}
+.promo-chip-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;}
+.promo-chip{
+  display:inline-flex; align-items:center; gap:6px; background:var(--surface-3); border-radius:20px;
+  padding:5px 6px 5px 12px; font-size:12.5px; color:var(--ink);
+}
+.promo-chip-remove{
+  background:none; border:none; color:var(--ink-soft); cursor:pointer; font-size:14px; line-height:1;
+  width:18px; height:18px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+}
+.promo-chip-remove:hover{background:var(--surface); color:var(--ink);}
+.promo-analysis-block + .promo-analysis-block{margin-top:22px; padding-top:20px; border-top:1px solid var(--border);}
+.promo-analysis-head{font-size:14px; margin-bottom:14px;}
+.promo-charts-grid{display:grid; grid-template-columns:1.6fr 1fr; gap:16px; margin-bottom:8px;}
+@media (max-width:860px){ .promo-charts-grid{grid-template-columns:1fr;} }
+.chart-block .subhead{margin-top:0;}
+.chart-controls{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;}
+.chart-controls .subhead{margin:0; margin-right:auto;}
+.chart-controls select{width:auto; font-size:11.5px; padding:5px 8px;}
+.chart-canvas-wrap{position:relative; height:240px;}
+.chart-canvas-wrap-donut{max-width:260px; margin:0 auto;}
+
 .card-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px;}
 .media-card{background:var(--surface-2); border-radius:9px; padding:15px 16px;}
 .media-card .m-name{font-size:13.5px; font-weight:700; margin-bottom:10px;}

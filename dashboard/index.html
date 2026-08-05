@@ -3,69 +3,95 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>아모레몰 주간 광고성과 대시보드</title>
+<title>아모레몰 광고 성과 코멘트 대시보드</title>
 <link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
 </head>
 <body>
 <div class="app">
   <aside class="rail">
     <div class="brand">
-      <span class="eyebrow">Amoremall · Weekly Ads</span>
-      <h1>주간 광고성과 대시보드</h1>
+      <span class="eyebrow">Amoremall · comment</span>
+      <h1>광고 성과 코멘트 대시보드</h1>
+    </div>
+
+    <div class="view-toggle" role="tablist">
+      <button type="button" class="view-toggle-btn active" id="viewModeWeeklyBtn" data-view="weekly" role="tab" aria-selected="true">주간 리포트</button>
+      <button type="button" class="view-toggle-btn" id="viewModeMonthlyBtn" data-view="monthly" role="tab" aria-selected="false">월간 리포트</button>
     </div>
 
     <div class="field">
       <button type="button" class="shortcut-btn refresh-btn" id="refreshDataBtn" disabled>⟳ 데이터 최신화</button>
       <p class="field-hint warning">⚠ 분석 전에 <b>꼭 먼저 눌러주세요</b> — 안 누르면 예전 데이터로 분석됩니다. (이 화면 세션에만 반영되고, 로컬 data.json 파일은 바꾸지 않습니다)</p>
+      <p class="field-hint" id="lastRefreshedHint"></p>
     </div>
 
-    <div class="field">
-      <label><span class="step-num">1</span>분석 탭 선택 <span class="optional-tag">(클릭만으로 다중 선택)</span></label>
-      <select id="tabSelect" multiple size="3"></select>
-      <p class="field-hint">여러 탭(월)을 함께 선택하면, 월 경계를 넘는 기간도 하나의 데이터 풀로 합쳐서 비교할 수 있습니다.</p>
-    </div>
+    <div id="weeklyRail">
+      <div class="field">
+        <label><span class="step-num">1</span>분석 탭 선택 <span class="optional-tag">(클릭만으로 다중 선택)</span></label>
+        <select id="tabSelect" multiple size="3"></select>
+        <p class="field-hint">여러 탭(월)을 함께 선택하면, 월 경계를 넘는 기간도 하나의 데이터 풀로 합쳐서 비교할 수 있습니다.</p>
+      </div>
 
-    <div class="field">
-      <label><span class="step-num">2</span>비교할 기간 선택</label>
-      <div class="date-range-row">
-        <div class="period-tag">A(기준)</div>
-        <div class="date-range-inputs">
-          <input type="date" id="dateAStart" aria-label="A기간 시작일">
-          <span class="arrow">~</span>
-          <input type="date" id="dateAEnd" aria-label="A기간 종료일">
+      <div class="field">
+        <label><span class="step-num">2</span>비교할 기간 선택</label>
+        <div class="date-range-row">
+          <div class="period-tag">A(기준)</div>
+          <div class="date-range-inputs">
+            <input type="date" id="dateAStart" aria-label="A기간 시작일">
+            <span class="arrow">~</span>
+            <input type="date" id="dateAEnd" aria-label="A기간 종료일">
+          </div>
         </div>
-      </div>
-      <div class="date-range-row">
-        <div class="period-tag">B(비교)</div>
-        <div class="date-range-inputs">
-          <input type="date" id="dateBStart" aria-label="B기간 시작일">
-          <span class="arrow">~</span>
-          <input type="date" id="dateBEnd" aria-label="B기간 종료일">
+        <div class="date-range-row">
+          <div class="period-tag">B(비교)</div>
+          <div class="date-range-inputs">
+            <input type="date" id="dateBStart" aria-label="B기간 시작일">
+            <span class="arrow">~</span>
+            <input type="date" id="dateBEnd" aria-label="B기간 종료일">
+          </div>
         </div>
+        <div class="date-shortcuts">
+          <button type="button" class="shortcut-btn" id="shortcutRecent">최근 7일 vs 이전 7일</button>
+        </div>
+        <p id="dateOverlapWarning" class="field-hint warning" style="display:none;">⚠ A기간과 B기간이 겹칩니다.</p>
       </div>
-      <div class="date-shortcuts">
-        <button type="button" class="shortcut-btn" id="shortcutRecent">최근 7일 vs 이전 7일</button>
+
+      <div class="field">
+        <label>이번 기간 특이사항 메모 <span class="optional-tag">(선택)</span></label>
+        <textarea id="weekNote" rows="3" placeholder="예: 서버 장애로 7/15 오전 트래픽 유실, 아모레위크 기획전 조기 종료 등"></textarea>
+        <p class="field-hint">B기간별로 자동 저장됩니다. 메모를 반영해 다시 분석하려면 "분석 시작"을 다시 누르세요.</p>
       </div>
-      <p id="dateOverlapWarning" class="field-hint warning" style="display:none;">⚠ A기간과 B기간이 겹칩니다.</p>
+
+      <button class="run-btn" id="runBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">3</span>분석 시작</button>
+
+      <label class="checkrow">
+        <input type="checkbox" id="slackNotifyCheckbox">
+        완료 시 Slack 알림 받기
+        <span id="slackNotifyStatus" class="slack-notify-status"></span>
+      </label>
+
+      <div class="rail-actions">
+        <button class="copy-btn" id="copyBtn" disabled>코멘트 복사</button>
+        <button class="copy-btn" id="qaToggleBtn" disabled>AI에게 질문하기</button>
+      </div>
     </div>
 
-    <div class="field">
-      <label>이번 기간 특이사항 메모 <span class="optional-tag">(선택)</span></label>
-      <textarea id="weekNote" rows="3" placeholder="예: 서버 장애로 7/15 오전 트래픽 유실, 아모레위크 기획전 조기 종료 등"></textarea>
-      <p class="field-hint">B기간별로 자동 저장됩니다. 메모를 반영해 다시 분석하려면 "분석 시작"을 다시 누르세요.</p>
-    </div>
+    <div id="monthlyRail" style="display:none;">
+      <div class="field">
+        <label><span class="step-num">1</span>비교할 월 선택</label>
+        <div class="date-range-row">
+          <div class="period-tag">A(기준)</div>
+          <select id="monthASelect"></select>
+        </div>
+        <div class="date-range-row">
+          <div class="period-tag">B(비교)</div>
+          <select id="monthBSelect"></select>
+        </div>
+        <p class="field-hint">데이터가 있는 월(탭)만 선택지에 나타납니다.</p>
+      </div>
 
-    <button class="run-btn" id="runBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">3</span>분석 시작</button>
-
-    <label class="checkrow">
-      <input type="checkbox" id="slackNotifyCheckbox">
-      완료 시 Slack 알림 받기
-      <span id="slackNotifyStatus" class="slack-notify-status"></span>
-    </label>
-
-    <div class="rail-actions">
-      <button class="copy-btn" id="copyBtn" disabled>코멘트 복사</button>
-      <button class="copy-btn" id="qaToggleBtn" disabled>AI에게 질문하기</button>
+      <button class="run-btn" id="monthlyRunBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">2</span>월간 분석 시작</button>
     </div>
 
     <details class="pipeline">
@@ -87,31 +113,55 @@
   </aside>
 
   <main class="main">
-    <div id="idleState" class="idle">
-      <h2>주차별 광고성과 코멘트 생성</h2>
-      <p>왼쪽에서 탭(들)과 A/B 비교 기간(날짜 범위)을 고른 뒤 분석을 시작하면, 목표별 매체 성과와 매출·신규가입·앱설치·트래픽 목표별 A 대비 B 성과 코멘트를 자동 생성합니다.</p>
-      <ol class="steps">
-        <li><span class="n">1</span><div><b>분석 탭 선택</b><span>여러 탭을 함께 선택하면 월 경계를 넘는 기간도 비교할 수 있습니다</span></div></li>
-        <li><span class="n">2</span><div><b>A기간 / B기간 선택</b><span>A가 기준(비교 대상 이전), B가 비교 대상(최근)입니다</span></div></li>
-        <li><span class="n">3</span><div><b>분석 시작 클릭</b><span>목표별 매체 성과와 매출·ROAS·첫구매·회원가입 변화가 생성됩니다</span></div></li>
-      </ol>
+    <div id="weeklyMain">
+      <div id="idleState" class="idle">
+        <h2>주차별 광고성과 코멘트 생성</h2>
+        <p>왼쪽에서 탭(들)과 A/B 비교 기간(날짜 범위)을 고른 뒤 분석을 시작하면, 목표별 매체 성과와 매출·신규가입·앱설치·트래픽 목표별 A 대비 B 성과 코멘트를 자동 생성합니다.</p>
+        <ol class="steps">
+          <li><span class="n">1</span><div><b>분석 탭 선택</b><span>여러 탭을 함께 선택하면 월 경계를 넘는 기간도 비교할 수 있습니다</span></div></li>
+          <li><span class="n">2</span><div><b>A기간 / B기간 선택</b><span>A가 기준(비교 대상 이전), B가 비교 대상(최근)입니다</span></div></li>
+          <li><span class="n">3</span><div><b>분석 시작 클릭</b><span>목표별 매체 성과와 매출·ROAS·첫구매·회원가입 변화가 생성됩니다</span></div></li>
+        </ol>
+      </div>
+
+      <div id="reportState" style="display:none;">
+        <div class="report-head">
+          <div class="compare-strip">
+            <span class="pill" id="labelA"></span>
+            <span class="arrow">→</span>
+            <span class="pill" id="labelB"></span>
+          </div>
+        </div>
+        <div id="sections"></div>
+      </div>
+    </div>
+
+    <div id="monthlyMain" style="display:none;">
+      <div id="monthlyIdleState" class="idle">
+        <h2>월간 리뷰</h2>
+        <p>왼쪽에서 비교할 두 달(A/B)을 고른 뒤 "월간 분석 시작"을 누르면, 이달 캠페인 세팅 변화·기획전 성과 분석·AI 채팅 기능이 열립니다.</p>
+        <ol class="steps">
+          <li><span class="n">1</span><div><b>비교할 월 선택</b><span>A가 기준(이전 달), B가 비교 대상(최근 달)입니다</span></div></li>
+          <li><span class="n">2</span><div><b>월간 분석 시작 클릭</b><span>선택한 두 달의 1일~말일 데이터를 불러옵니다</span></div></li>
+        </ol>
+      </div>
+
+      <div id="monthlyReportState" style="display:none;">
+        <div class="report-head">
+          <div class="compare-strip">
+            <span class="pill" id="monthlyLabelA"></span>
+            <span class="arrow">→</span>
+            <span class="pill" id="monthlyLabelB"></span>
+          </div>
+        </div>
+        <div id="monthlySections"></div>
+      </div>
     </div>
 
     <div id="errorState" class="error-box" style="display:none;">
       <h2>data.json을 불러오지 못했습니다</h2>
       <p>이 페이지는 <code>fetch()</code>로 같은 폴더의 <code>data.json</code>을 읽습니다. 파일을 더블클릭해 여는 <code>file://</code> 방식으로는 브라우저가 fetch를 막을 수 있습니다. AI 코멘트(<code>/api/comment</code>)까지 로컬에서 테스트하려면 <code>vercel dev</code>로 실행해주세요 — <code>npx serve</code>는 정적 파일만 서빙해서 API 라우트가 동작하지 않습니다. (Vercel에 배포하면 둘 다 문제 없이 동작합니다.)</p>
       <p class="msg"></p>
-    </div>
-
-    <div id="reportState" style="display:none;">
-      <div class="report-head">
-        <div class="compare-strip">
-          <span class="pill" id="labelA"></span>
-          <span class="arrow">→</span>
-          <span class="pill" id="labelB"></span>
-        </div>
-      </div>
-      <div id="sections"></div>
     </div>
   </main>
 
