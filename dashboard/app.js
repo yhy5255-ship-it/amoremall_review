@@ -456,11 +456,132 @@
     return `<div class="m-sub-row"><span class="lbl">${label}</span><span>${fmt(valA)} → ${fmt(valB)}${pctText}</span></div>`;
   }
 
-  function renderMediaPerformance(goal) {
-    const body = document.getElementById("mediaPerfBody");
-    if (!body || !mediaPerfState) return;
-    const rows = computeMediaPerformance(mediaPerfState.groupsA, mediaPerfState.groupsB, goal);
-    if (!rows.length) { body.innerHTML = `<p class="empty-note">이 목표에는 매체 데이터가 없습니다.</p>`; return; }
+  // Like groupByMedia but split one level further by Product/optimization (AO열) -
+  // only for the MEDIA 매체 성과 detail table ("자세히 보기"). The media-level summary
+  // above intentionally collapses optimization into one row per media, so this reads
+  // RAW (day-level, unaggregated) groups, not groupsA/groupsB - aggregateGroupsByDateRange
+  // doesn't key on optimization (see its comment above), so that granularity is
+  // already gone by the time groupsA/groupsB exist.
+  function groupByMediaOptimization(groups) {
+    const m = new Map();
+    for (const g of groups) {
+      const media = g.media || "(기타)";
+      const optimization = g.optimization || "(미지정)";
+      const key = media + "||" + optimization;
+      if (!m.has(key)) m.set(key, { media, optimization, spend: 0, gmv: 0, install: 0, firstPurchase: 0, signup: 0, impr: 0, click: 0 });
+      const o = m.get(key);
+      o.spend += g.spend; o.gmv += g.gmv; o.install += g.install; o.firstPurchase += g.firstPurchase;
+      o.signup += g.signup; o.impr += g.impr; o.click += g.click;
+    }
+    return [...m.values()];
+  }
+
+  function sumDetailMetrics(objs) {
+    const out = { spend: 0, gmv: 0, install: 0, firstPurchase: 0, signup: 0, impr: 0, click: 0 };
+    for (const o of objs) {
+      out.spend += o.spend; out.gmv += o.gmv; out.install += o.install;
+      out.firstPurchase += o.firstPurchase; out.signup += o.signup;
+      out.impr += o.impr; out.click += o.click;
+    }
+    return out;
+  }
+  const EMPTY_DETAIL_METRICS = { spend: 0, gmv: 0, install: 0, firstPurchase: 0, signup: 0, impr: 0, click: 0 };
+
+  // media -> [{optimization, a, b}] for the detail table, same A/B-union convention
+  // as computeMediaPerformance but one level deeper (media x optimization), plus a
+  // grand total across every row for the TOTAL table row.
+  function computeMediaOptimizationDetail(rawGroupsA, rawGroupsB, goal) {
+    const optA = groupByMediaOptimization(rawGroupsA.filter(g => g.goal === goal));
+    const optB = groupByMediaOptimization(rawGroupsB.filter(g => g.goal === goal));
+    const key = (o) => o.media + "||" + o.optimization;
+    const mapA = new Map(optA.map(o => [key(o), o]));
+    const mapB = new Map(optB.map(o => [key(o), o]));
+    const byMedia = new Map();
+    const seen = new Set(); // dedupes a (media, optimization) key seen in both optA and optB
+    for (const o of [...optA, ...optB]) {
+      const k = key(o);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const row = { optimization: o.optimization, a: mapA.get(k) || EMPTY_DETAIL_METRICS, b: mapB.get(k) || EMPTY_DETAIL_METRICS };
+      if (!byMedia.has(o.media)) byMedia.set(o.media, []);
+      byMedia.get(o.media).push(row);
+    }
+
+    const mediaGroups = [...byMedia.entries()].map(([media, rows]) => {
+      rows.sort((r1, r2) => r2.b.spend - r1.b.spend);
+      return { media, rows, mediaA: sumDetailMetrics(rows.map(r => r.a)), mediaB: sumDetailMetrics(rows.map(r => r.b)) };
+    });
+    mediaGroups.sort((g1, g2) => g2.mediaB.spend - g1.mediaB.spend);
+    const totalA = sumDetailMetrics(mediaGroups.map(g => g.mediaA));
+    const totalB = sumDetailMetrics(mediaGroups.map(g => g.mediaB));
+    return { mediaGroups, totalA, totalB };
+  }
+
+  // One "A값 → B값 (▲/▼증감%)" row of the 12 detail-table metrics for a given
+  // media's (or the TOTAL row's, when media is null) a/b totals - reuses abCellHtml
+  // (already used by the monthly promo-compare table) for every cell instead of
+  // reimplementing the compare-cell format.
+  function mediaDetailRowCells(media, a, b) {
+    const naAll = media && UNSUPPORTED_FP_SU_MEDIA.includes(media);
+    const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
+    const cpiValid = a.install > 0 && b.install > 0;
+    const fpCpaValid = !naAll && a.firstPurchase > 0 && b.firstPurchase > 0;
+    const suCpaValid = !naAll && a.signup > 0 && b.signup > 0;
+    const cpcValid = a.click > 0 && b.click > 0;
+    const ctrValid = a.impr > 0 && b.impr > 0;
+    const ctrA = ctrValid ? (a.click / a.impr * 100) : 0, ctrB = ctrValid ? (b.click / b.impr * 100) : 0;
+    const na = "(수집 불가)";
+    return `
+      <td>${abCellHtml(a.spend, b.spend, fmtWon)}</td>
+      <td>${abCellHtml(roasA, roasB, fmtPct, true)}</td>
+      <td>${abCellHtml(a.install, b.install, fmtCount)}</td>
+      <td>${cpiValid ? abCellHtml(a.spend / a.install, b.spend / b.install, fmtWon) : "-"}</td>
+      <td>${abCellHtml(a.gmv, b.gmv, fmtWon)}</td>
+      <td>${naAll ? na : abCellHtml(a.firstPurchase, b.firstPurchase, fmtCount)}</td>
+      <td>${naAll ? na : (fpCpaValid ? abCellHtml(a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon) : "-")}</td>
+      <td>${naAll ? na : abCellHtml(a.signup, b.signup, fmtCount)}</td>
+      <td>${naAll ? na : (suCpaValid ? abCellHtml(a.spend / a.signup, b.spend / b.signup, fmtWon) : "-")}</td>
+      <td>${abCellHtml(a.click, b.click, fmtCount)}</td>
+      <td>${cpcValid ? abCellHtml(a.spend / a.click, b.spend / b.click, fmtWon) : "-"}</td>
+      <td>${ctrValid ? abCellHtml(ctrA, ctrB, fmtPct, true) : "-"}</td>`;
+  }
+
+  const MEDIA_DETAIL_HEAD = `<tr>
+    <th>매체</th><th>Product/최적화</th>
+    <th>광고비</th><th>ROAS</th><th>설치</th><th>CPI</th><th>매출</th>
+    <th>첫구매</th><th>첫구매CPA</th><th>회원가입</th><th>회원가입CPA</th>
+    <th>클릭</th><th>CPC</th><th>CTR</th>
+  </tr>`;
+
+  // "자세히 보기" toggle body: media x Product/optimization breakdown table, always
+  // in the same A→B compare format as the summary cards above it (this screen only
+  // ever shows two periods side by side, so there's no "single period" mode to support).
+  function buildMediaDetailTableHtml(rawGroupsA, rawGroupsB, goal) {
+    const { mediaGroups, totalA, totalB } = computeMediaOptimizationDetail(rawGroupsA, rawGroupsB, goal);
+    if (!mediaGroups.length) return `<p class="empty-note">상세 데이터가 없습니다.</p>`;
+
+    const bodyRows = mediaGroups.map(({ media, rows }) => rows.map((r, i) => `
+      <tr>
+        ${i === 0 ? `<td rowspan="${rows.length}">${esc(media)}</td>` : ""}
+        <td>${esc(r.optimization)}</td>
+        ${mediaDetailRowCells(media, r.a, r.b)}
+      </tr>`).join("")).join("");
+    const totalRow = `<tr class="detail-total-row"><td colspan="2">TOTAL</td>${mediaDetailRowCells(null, totalA, totalB)}</tr>`;
+
+    return `<div class="table-wrap"><table class="detail-table media-detail-table">
+      <thead>${MEDIA_DETAIL_HEAD}</thead>
+      <tbody>${bodyRows}${totalRow}</tbody>
+    </table></div>`;
+  }
+
+  // Card-grid HTML for one goal's A/B media comparison - shared by the weekly MEDIA
+  // section (renderMediaPerformance below) and the monthly review's MEDIA section,
+  // so both stay byte-for-byte identical without copy-pasting the calculation.
+  // rawGroupsA/rawGroupsB (day-level, unaggregated) back the "자세히 보기" detail
+  // table only - the summary cards above still read the already-aggregated groupsA/B.
+  function buildMediaCardsHtml(groupsA, groupsB, goal, rawGroupsA, rawGroupsB) {
+    const rows = computeMediaPerformance(groupsA, groupsB, goal);
+    if (!rows.length) return `<p class="empty-note">이 목표에는 매체 데이터가 없습니다.</p>`;
 
     const cards = rows.map(({ media, a, b }) => {
       const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
@@ -484,13 +605,25 @@
       </div>`;
     }).join("");
 
-    body.innerHTML = `<div class="card-grid">${cards}</div>`;
+    const detailToggle = (rawGroupsA && rawGroupsB) ? `
+      <details class="detail media-detail-toggle">
+        <summary>자세히 보기 ▾</summary>
+        ${buildMediaDetailTableHtml(rawGroupsA, rawGroupsB, goal)}
+      </details>` : "";
+
+    return `<div class="card-grid">${cards}</div>${detailToggle}`;
   }
 
-  function buildMediaPerformanceSection(groupsA, groupsB) {
+  function renderMediaPerformance(goal) {
+    const body = document.getElementById("mediaPerfBody");
+    if (!body || !mediaPerfState) return;
+    body.innerHTML = buildMediaCardsHtml(mediaPerfState.groupsA, mediaPerfState.groupsB, goal, mediaPerfState.groupsARaw, mediaPerfState.groupsBRaw);
+  }
+
+  function buildMediaPerformanceSection(groupsA, groupsB, groupsARaw, groupsBRaw) {
     const goals = GOAL_ORDER.filter(g => groupsA.some(x => x.goal === g) || groupsB.some(x => x.goal === g));
     if (!goals.length) return "";
-    mediaPerfState = { groupsA, groupsB };
+    mediaPerfState = { groupsA, groupsB, groupsARaw, groupsBRaw };
     const defaultGoal = goals.includes("매출") ? "매출" : goals[0];
     const goalOptions = goals.map(g => `<option value="${g}"${g === defaultGoal ? " selected" : ""}>${g}</option>`).join("");
 
@@ -1237,9 +1370,117 @@
     document.getElementById("monthlyLabelB").textContent = monthlyState.labelB;
     monthlyIdleState.style.display = "none";
     monthlyReportState.style.display = "block";
-    monthlySectionsEl.innerHTML = buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
+    monthlySectionsEl.innerHTML = buildMonthlyMediaSection(monthlyState) + buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
+    const monthlyMediaGoalSelect = document.getElementById("monthlyMediaGoalSelect");
+    if (monthlyMediaGoalSelect) renderMonthlyMediaPerformance(monthlyMediaGoalSelect.value);
     resetMonthlyQaPanel();
     document.getElementById("monthlyQaToggleBtn").disabled = false;
+  }
+
+  // ---------- monthly MEDIA 매체 성과 (same calc/format as the weekly MEDIA section,
+  // via buildMediaCardsHtml, plus an AI comment + follow-up the weekly one doesn't have) ----------
+  let monthlyMediaState = null; // {groupsA, groupsB, groupsARaw, groupsBRaw, goal, chat}
+
+  function buildMonthlyMediaSection(state) {
+    const goals = GOAL_ORDER.filter(g => state.groupsA.some(x => x.goal === g) || state.groupsB.some(x => x.goal === g));
+    if (!goals.length) return "";
+    const defaultGoal = goals.includes("매출") ? "매출" : goals[0];
+    monthlyMediaState = { groupsA: state.groupsA, groupsB: state.groupsB, groupsARaw: state.groupsARaw, groupsBRaw: state.groupsBRaw, goal: defaultGoal, chat: null };
+    const goalOptions = goals.map(g => `<option value="${g}"${g === defaultGoal ? " selected" : ""}>${g}</option>`).join("");
+    return `<section class="section-card" data-ch="MEDIA">
+      <div class="section-title">
+        <span class="tag">MEDIA</span><h3>매체 성과</h3>
+        <select id="monthlyMediaGoalSelect" class="top-metric-select">${goalOptions}</select>
+      </div>
+      <div id="monthlyMediaPerfBody"></div>
+      <div class="diff-actions">
+        <button type="button" class="run-btn" id="monthlyMediaCommentBtn">코멘트 생성</button>
+      </div>
+      <div id="monthlyMediaCommentBody"></div>
+    </section>`;
+  }
+
+  // 목표를 바꾸면 표 자체가 완전히 달라지니, 이전 목표 기준으로 생성된 코멘트/후속
+  // 대화가 남아있으면 혼란을 준다 - 표와 함께 항상 초기화한다.
+  function renderMonthlyMediaPerformance(goal) {
+    const body = document.getElementById("monthlyMediaPerfBody");
+    if (!body || !monthlyMediaState) return;
+    body.innerHTML = buildMediaCardsHtml(monthlyMediaState.groupsA, monthlyMediaState.groupsB, goal, monthlyMediaState.groupsARaw, monthlyMediaState.groupsBRaw);
+    monthlyMediaState.goal = goal;
+    monthlyMediaState.chat = null;
+    const commentBody = document.getElementById("monthlyMediaCommentBody");
+    if (commentBody) commentBody.innerHTML = "";
+  }
+
+  function buildMonthlyMediaCommentPayload(goal) {
+    const rows = computeMediaPerformance(monthlyMediaState.groupsA, monthlyMediaState.groupsB, goal);
+    const items = rows.map(({ media, a, b }) => {
+      const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
+      const naAll = UNSUPPORTED_FP_SU_MEDIA.includes(media);
+      const fpCpaValid = !naAll && a.firstPurchase > 0 && b.firstPurchase > 0;
+      const suCpaValid = !naAll && a.signup > 0 && b.signup > 0;
+      const naText = "수집 불가";
+      return {
+        media,
+        gmvA: fmtWon(a.gmv), gmvB: fmtWon(b.gmv),
+        roasA: fmtPct(roasA), roasB: fmtPct(roasB),
+        firstPurchaseA: naAll ? naText : fmtCount(a.firstPurchase), firstPurchaseB: naAll ? naText : fmtCount(b.firstPurchase),
+        firstPurchaseCpaA: naAll ? naText : (fpCpaValid ? fmtWon(a.spend / a.firstPurchase) : "-"),
+        firstPurchaseCpaB: naAll ? naText : (fpCpaValid ? fmtWon(b.spend / b.firstPurchase) : "-"),
+        signupA: naAll ? naText : fmtCount(a.signup), signupB: naAll ? naText : fmtCount(b.signup),
+        signupCpaA: naAll ? naText : (suCpaValid ? fmtWon(a.spend / a.signup) : "-"),
+        signupCpaB: naAll ? naText : (suCpaValid ? fmtWon(b.spend / b.signup) : "-"),
+      };
+    });
+    return { type: "mediaPerformance", goal, monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB, items };
+  }
+
+  async function generateMonthlyMediaComment() {
+    if (!monthlyMediaState) return;
+    const goal = document.getElementById("monthlyMediaGoalSelect").value;
+    const btn = document.getElementById("monthlyMediaCommentBtn");
+    const bodyEl = document.getElementById("monthlyMediaCommentBody");
+    btn.disabled = true;
+    bodyEl.innerHTML = commentLoadingHtml();
+    const payload = buildMonthlyMediaCommentPayload(goal);
+    try {
+      const res = await fetch("/api/monthly-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      monthlyMediaState.chat = { payload, history: [{ role: "model", content: leadsToPlainText(body.leads) }] };
+      bodyEl.innerHTML = `
+        ${renderMonthlyLeadsHtml(body.leads)}
+        ${inlineFollowupHtml("monthlyMediaFollowup", "예: 이 중 ROAS가 가장 많이 오른 매체는?")}`;
+    } catch (err) {
+      bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function submitMonthlyMediaFollowup(question) {
+    if (!monthlyMediaState || !monthlyMediaState.chat) return;
+    const historyEl = document.getElementById("monthlyMediaFollowupHistory");
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    monthlyMediaState.chat.history.push({ role: "user", content: question });
+    const loadingId = "mmf-loading-" + Math.random().toString(36).slice(2);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    try {
+      const res = await fetch("/api/monthly-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...monthlyMediaState.chat.payload, question, history: monthlyMediaState.chat.history.slice(0, -1) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
+      monthlyMediaState.chat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
+    } catch (err) {
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
   }
 
   // ---------- section 3: 이달 캠페인 세팅 변화 (campaign/group setting diff) ----------
@@ -2242,6 +2483,8 @@
         st.mediaShare = computePromoMediaShare(promoAnalysisState.rowsA, promoAnalysisState.rowsB, sel.brand, sel.promo, st.donutMetric);
         renderPromoCharts(id);
       }
+    } else if (e.target.id === "monthlyMediaGoalSelect") {
+      renderMonthlyMediaPerformance(e.target.value);
     }
   });
   monthlySectionsEl.addEventListener("click", (e) => {
@@ -2254,6 +2497,10 @@
       generateSettingDiffComment();
     } else if (e.target.id === "settingDiffFollowupToggle") {
       toggleInlinePanel("settingDiffFollowupPanel");
+    } else if (e.target.id === "monthlyMediaCommentBtn") {
+      generateMonthlyMediaComment();
+    } else if (e.target.id === "monthlyMediaFollowupToggle") {
+      toggleInlinePanel("monthlyMediaFollowupPanel");
     } else if (searchItem) {
       addPromoSelection(searchItem.dataset.brand, searchItem.dataset.promo);
     } else if (chipRemove) {
@@ -2279,6 +2526,11 @@
     if (e.target.id === "settingDiffFollowupForm") {
       e.preventDefault();
       submitFromInlineChat("settingDiffFollowupInput", submitSettingDiffFollowup);
+      return;
+    }
+    if (e.target.id === "monthlyMediaFollowupForm") {
+      e.preventDefault();
+      submitFromInlineChat("monthlyMediaFollowupInput", submitMonthlyMediaFollowup);
       return;
     }
     const m = e.target.id.match(/^promoFollowup(\d+)Form$/);
@@ -2436,6 +2688,11 @@
 
     const groupsA = aggregateGroupsByDateRange(DATA_CURRENT.groups, startA, endA);
     const groupsB = aggregateGroupsByDateRange(DATA_CURRENT.groups, startB, endB);
+    // day-level, NOT aggregated across dates - only the MEDIA 매체 성과 detail table's
+    // media x Product/optimization breakdown needs this; groupsA/B above already lost
+    // that granularity (aggregateGroupsByDateRange doesn't key on optimization).
+    const groupsARaw = DATA_CURRENT.groups.filter(g => g.date && g.date >= startA && g.date <= endA);
+    const groupsBRaw = DATA_CURRENT.groups.filter(g => g.date && g.date >= startB && g.date <= endB);
 
     document.getElementById("labelA").textContent = weekALabel;
     document.getElementById("labelB").textContent = weekBLabel;
@@ -2474,7 +2731,7 @@
       section.promptData.newOptimization = computeNewValues(DATA_CURRENT.groups, startA, endA, startB, endB, goal, "optimization");
     }
 
-    sectionsEl.innerHTML = buildMediaPerformanceSection(groupsA, groupsB) + rev.html + signup.html + app.html + traffic.html;
+    sectionsEl.innerHTML = buildMediaPerformanceSection(groupsA, groupsB, groupsARaw, groupsBRaw) + rev.html + signup.html + app.html + traffic.html;
     initDetailBlocks();
 
     const mediaGoalSelect = document.getElementById("mediaGoalSelect");

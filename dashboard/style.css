@@ -350,6 +350,11 @@ details.detail summary{cursor:pointer; font-size:12.5px; color:var(--ink-soft); 
 .media-card .m-sub-row{display:flex; justify-content:space-between; gap:8px; font-size:11.5px; margin-top:5px; color:var(--ink);}
 .media-card .m-sub-row .lbl{color:var(--ink-soft); flex:none;}
 .media-card .cell-na{color:var(--ink-soft);}
+.media-detail-toggle{margin-top:14px;}
+.media-detail-table td:nth-child(2){text-align:left;}
+.media-detail-table td[rowspan]{vertical-align:top; font-weight:600;}
+.media-detail-table tr.detail-total-row{font-weight:700;}
+.media-detail-table tr.detail-total-row td{border-top:2px solid var(--border);}
 
 /* ---------- Q&A side panel ---------- */
 #qaToggleBtn.active{background:var(--surface-3); color:var(--ink); border-color:var(--accent);}
