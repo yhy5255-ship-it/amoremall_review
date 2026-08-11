@@ -327,6 +327,7 @@ details.detail summary{cursor:pointer; font-size:12.5px; color:var(--ink-soft); 
 .promo-chip-remove:hover{background:var(--surface); color:var(--ink);}
 .promo-analysis-block + .promo-analysis-block{margin-top:22px; padding-top:20px; border-top:1px solid var(--border);}
 .promo-analysis-head{font-size:14px; margin-bottom:14px;}
+.promo-compare-block{margin-top:14px;}
 .promo-charts-grid{display:grid; grid-template-columns:1.6fr 1fr; gap:16px; margin-bottom:8px;}
 @media (max-width:860px){ .promo-charts-grid{grid-template-columns:1fr;} }
 .chart-block .subhead{margin-top:0;}

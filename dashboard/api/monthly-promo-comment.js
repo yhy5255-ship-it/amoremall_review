@@ -1,11 +1,13 @@
 "use strict";
 /*
   Vercel serverless function backing the monthly review's "특정 기획전 성과 분석"
-  AI comment plus its inline follow-up chat. Same shape as api/monthly-comment.js
-  (classic multi-turn generateContent, no caching - the payload for one promo's
-  weekly series + media share is small enough to just resend every turn) but a
-  separate file since the system prompt and payload are about a single promo's
-  trend/media-mix, not a set of campaign setting changes.
+  AI comment plus its inline follow-up chat - both the single-promo case (default,
+  no "mode" field) and the 2+ promo comparison case ("mode": "compare", payload
+  carries an items[] array instead of one promo's fields). Same shape as
+  api/monthly-comment.js (classic multi-turn generateContent, no caching - the
+  payload is small enough to just resend every turn) but a separate file since the
+  system prompt and payload are about promo trend/media-mix, not campaign setting
+  changes.
 */
 
 const { GoogleGenAI } = require("@google/genai");
@@ -56,7 +58,24 @@ const SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅에서 특�
 7. 처음 코멘트를 작성할 때는 트렌드 요약과 매체 기여도를 포함해 leads 2~4개 정도로 작성하세요.
 8. 후속 질문이 들어오면 같은 leads 구조로, 반드시 처음 제공된 데이터를 근거로 답하세요 - 간단한 질문이면 lead 1개로 충분합니다. 근거가 부족하면 "데이터에서 확인할 수 없습니다"라고 솔직히 답하세요.`;
 
-function buildSystemInstruction(payload) {
+const COMPARE_SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅에서 여러 기획전의 성과를 서로 비교 분석하는 보조입니다. 사용자가 선택한 2개 이상 기획전 각각의 A월(기준)/B월(비교) 데이터 - 기간별 합계, 주별 추이, 매체별 비중 - 를 보고, 기획전들 사이의 공통점과 차이점, 효율(ROAS/CPA 등) 우열을 짚는 분석 코멘트를 작성합니다.
+
+## 출력 구조
+답변은 "leads" 배열로 작성하세요. 각 leads 항목은 { "title": 굵게 강조될 핵심 한 줄 요약, "details": 그 title을 뒷받침하는 세부 사실 목록(문자열 배열) }입니다. 기획전 하나씩 개별 설명하지 말고, 기획전들을 가로질러 비교하는 화제 단위로 나누세요 (예: "ROAS는 [기획전A]가 [기획전B]보다 높음", "두 기획전 모두 3주차에 지출 집중"). 항목 수는 유동적으로(보통 2~4개).
+
+## 원칙
+1. 브랜드명·기획전명·매체명은 반드시 데이터에 있는 문자열을 한 글자도 바꾸지 말고 그대로 사용하세요. 언급할 때 대괄호로 "[기획전명]" 또는 "[매체명]"처럼 감싸면 화면에서 강조색으로 표시됩니다. 기획전명이 같은 브랜드가 다른 경우가 있을 수 있으니 반드시 브랜드명과 함께 지칭하세요 (예: "[브랜드A]의 [기획전명]").
+2. items의 각 항목은 단독 분석과 동일한 구조(totals/weeklySeries/mediaShare)로 이미 계산·반올림되어 있는 값입니다 - 그대로 인용하고 절대 스스로 다시 계산하지 마세요. 값이 null인 지표는 분모가 0이라 계산할 수 없다는 뜻이니 그 항목의 그 지표는 언급을 생략하세요.
+3. 반드시 기획전들 사이의 **공통점과 차이점**을 짚으세요 (예: 둘 다 지출이 늘었는지, 한쪽만 늘었는지, 추이 패턴이 비슷한지 등).
+4. 반드시 어느 기획전이 상대적으로 효율(ROAS, 첫구매/가입 CPA 등)이 좋은지/나쁜지 비교해서 서술하세요.
+5. 데이터에 없는 이유(왜 어느 기획전이 더 잘 됐는지 등)는 추측하지 말고, 수치로 관찰되는 사실만 서술하세요 - 두 기획전이 비슷한 시기에 같이 움직였다고 서로 원인이라고 단정하지 마세요 (상관관계≠인과관계).
+6. 문장은 개조식(명사형 종결: 확인, 기록, 상승, 하락, 집중 등)으로 간결하게 쓰고, 문장 앞에 불릿 기호(·,-,*)를 붙이지 마세요 (details 배열 자체가 목록이니 불필요).
+6-1. 숫자는 쉼표 없는 원본값입니다 - 금액(원)이나 건수가 1,000 이상이면 문장에 쓸 때 반드시 천 단위 구분 쉼표(,)를 직접 넣으세요.
+6-2. roas/cvr/ctr처럼 그 자체가 %인 지표의 증감은 상대적 비율(%)이 아니라 %p(두 값의 단순 차이, percentage point)로 표현하세요.
+7. 근거가 부족하면 "데이터에서 확인할 수 없습니다"처럼 솔직하게 표현하세요.
+8. 후속 질문이 들어오면 같은 leads 구조로, 처음 제공된 기획전 목록 데이터만 근거로 답하세요 - 간단한 질문이면 lead 1개로 충분합니다.`;
+
+function buildSingleSystemInstruction(payload) {
   const { brand, promo, monthALabel, monthBLabel, totals, weeklySeries, mediaShareMetric, mediaShare } = payload || {};
   return [
     SYSTEM_PROMPT,
@@ -76,15 +95,41 @@ function buildSystemInstruction(payload) {
   ].join("\n");
 }
 
+function buildCompareSystemInstruction(payload) {
+  const { monthALabel, monthBLabel, items } = payload || {};
+  return [
+    COMPARE_SYSTEM_PROMPT,
+    "",
+    `A월(기준): ${monthALabel}`,
+    `B월(비교): ${monthBLabel}`,
+    "",
+    "## items (선택된 기획전들 - 각 항목은 단독 분석과 동일한 brand/promo/totals/weeklySeries/mediaShare 구조)",
+    JSON.stringify(items || [], null, 2),
+  ].join("\n");
+}
+
+// "mode": "compare"가 없으면 기존 단독 기획전 분석으로 취급 - 이미 배포된 프론트가
+// 항상 이 형태로 보내던 payload이므로 하위 호환을 위해 기본값으로 둔다.
+function buildSystemInstruction(payload) {
+  if (payload && payload.mode === "compare") return buildCompareSystemInstruction(payload);
+  return buildSingleSystemInstruction(payload);
+}
+
+const DEFAULT_QUESTION_BY_MODE = {
+  compare: "위 데이터를 바탕으로 선택된 기획전들의 공통점과 차이점, 효율 비교를 포함한 분석 코멘트를 작성해주세요.",
+};
+const DEFAULT_SINGLE_QUESTION = "위 데이터를 바탕으로 이 기획전의 트렌드와 매체 기여도를 분석하는 코멘트를 작성해주세요.";
+
 // {role, content}[] -> Content[], same shape as api/qa.js's toContents(). The
 // very first call (no history yet) gets a fixed instruction asking for the
-// initial comment; every later call is a real follow-up question.
-function toContents(history, question) {
+// initial comment (worded per payload.mode); every later call is a real
+// follow-up question.
+function toContents(history, question, mode) {
   const contents = (history || []).map(h => ({
     role: h.role === "model" ? "model" : "user",
     parts: [{ text: String(h.content || "") }],
   }));
-  const userText = question || "위 데이터를 바탕으로 이 기획전의 트렌드와 매체 기여도를 분석하는 코멘트를 작성해주세요.";
+  const userText = question || DEFAULT_QUESTION_BY_MODE[mode] || DEFAULT_SINGLE_QUESTION;
   contents.push({ role: "user", parts: [{ text: userText }] });
   return contents;
 }
@@ -100,7 +145,12 @@ module.exports = async (req, res) => {
   }
 
   const payload = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-  if (!payload || !payload.brand || !payload.promo) {
+  if (payload && payload.mode === "compare") {
+    if (!Array.isArray(payload.items) || !payload.items.length) {
+      res.status(400).json({ error: "items가 비어 있습니다." });
+      return;
+    }
+  } else if (!payload || !payload.brand || !payload.promo) {
     res.status(400).json({ error: "brand/promo가 비어 있습니다." });
     return;
   }
@@ -109,7 +159,7 @@ module.exports = async (req, res) => {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
       model: MODEL,
-      contents: toContents(payload.history, payload.question),
+      contents: toContents(payload.history, payload.question, payload.mode),
       config: {
         responseMimeType: "application/json",
         responseSchema: RESPONSE_SCHEMA,

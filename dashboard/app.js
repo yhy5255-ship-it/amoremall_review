@@ -1759,6 +1759,10 @@
   let promoSelections = []; // [{id, brand, promo}], in selection order
   let promoSelectionSeq = 0; // monotonic - stays stable across re-renders even if an earlier selection is removed
   let promoBlockState = {}; // id -> {weeklyA, weeklyB, chartMetrics:{bar,line}, donutMetric, mediaShare, chat, chartInstances}
+  // Used instead of promoBlockState whenever 2+ promos are selected - one shared
+  // multi-series trend chart + grouped media bar chart + one comparison comment,
+  // rather than N independent per-promo blocks.
+  let promoCompareState = { metric: "gmv", mediaMetric: "spend", chat: null, chartInstances: [] };
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -1780,6 +1784,8 @@
   const PROMO_METRIC_OPTIONS = [
     { key: "gmv", label: "GMV", fmt: fmtWonAbbrev },
     { key: "roas", label: "ROAS", fmt: fmtPct },
+    { key: "spend", label: "지출", fmt: fmtWonAbbrev },
+    { key: "install", label: "설치수", fmt: fmtCount },
     { key: "cvr", label: "CVR", fmt: fmtPct2 },
     { key: "ctr", label: "CTR", fmt: fmtPct2 },
     { key: "cpc", label: "CPC", fmt: fmtWon },
@@ -1823,6 +1829,7 @@
     promoSelections = [];
     promoSelectionSeq = 0;
     promoBlockState = {};
+    promoCompareState = { metric: "gmv", mediaMetric: "spend", chat: null, chartInstances: [] };
     return `<section class="section-card" data-ch="PROMO">
       <div class="section-title"><span class="tag">PROMO</span><h3>특정 기획전 성과 분석</h3></div>
       <div class="field promo-search-field">
@@ -1834,29 +1841,39 @@
     </section>`;
   }
 
-  function renderPromoSearchResults(query) {
+  // opts.keepOpen: shows the (already-selected-excluded) full search index on an
+  // empty query instead of hiding the panel - used right after a selection so the
+  // list stays open for picking the next promo, without forcing a re-type.
+  function renderPromoSearchResults(query, opts) {
     const resultsEl = document.getElementById("promoSearchResults");
     if (!resultsEl || !promoAnalysisState) return;
+    const keepOpen = !!(opts && opts.keepOpen);
     const q = query.trim().toLowerCase();
-    if (!q) { resultsEl.style.display = "none"; resultsEl.innerHTML = ""; return; }
-    const matches = promoAnalysisState.searchIndex
-      .filter(p => p.promo.toLowerCase().includes(q) || (p.brand && p.brand.toLowerCase().includes(q)))
+    if (!q && !keepOpen) { resultsEl.style.display = "none"; resultsEl.innerHTML = ""; return; }
+    const pool = q
+      ? promoAnalysisState.searchIndex.filter(p => p.promo.toLowerCase().includes(q) || (p.brand && p.brand.toLowerCase().includes(q)))
+      : promoAnalysisState.searchIndex;
+    // 이미 선택된 기획전은 목록에서 제외 - 중복 선택을 막는다.
+    const matches = pool
+      .filter(p => !promoSelections.some(s => s.brand === p.brand && s.promo === p.promo))
       .slice(0, 20);
     resultsEl.innerHTML = matches.length
       ? matches.map(p => `<div class="promo-search-item" data-brand="${esc(p.brand)}" data-promo="${esc(p.promo)}">${esc(p.brand)} · ${esc(p.promo)}</div>`).join("")
-      : `<div class="promo-search-item promo-search-empty">일치하는 기획전/브랜드가 없습니다.</div>`;
+      : `<div class="promo-search-item promo-search-empty">${q ? "일치하는 기획전/브랜드가 없습니다." : "선택 가능한 기획전이 없습니다."}</div>`;
     resultsEl.style.display = "block";
   }
 
+  // 선택 후에도 검색 리스트를 닫지 않고 입력값만 비운다 - 바로 다음 기획전을
+  // 검색/선택할 수 있게 (기존에는 클릭할 때마다 리스트가 닫혀서 매번 다시 클릭해서
+  // 열어야 했다).
   function addPromoSelection(brand, promo) {
     if (!promoSelections.some(p => p.brand === brand && p.promo === promo)) {
       promoSelections.push({ id: promoSelectionSeq++, brand, promo });
       renderPromoAnalysisList();
     }
     const input = document.getElementById("promoSearchInput");
-    const results = document.getElementById("promoSearchResults");
-    if (input) input.value = "";
-    if (results) results.style.display = "none";
+    if (input) { input.value = ""; input.focus(); }
+    renderPromoSearchResults("", { keepOpen: true });
   }
 
   function removePromoSelection(id) {
@@ -1893,6 +1910,8 @@
     return {
       gmv: Math.round(w.gmv),
       roas: w.spend > 0 ? Math.round(roas(w.gmv, w.spend)) : null,
+      spend: Math.round(w.spend),
+      install: Math.round(w.install),
       cvr: w.click > 0 ? Math.round((w.purchaseConv / w.click * 100) * 100) / 100 : null,
       ctr: w.impr > 0 ? Math.round(ctr_(w.click, w.impr) * 100) / 100 : null,
       cpc: w.click > 0 ? Math.round(cpc_(w.spend, w.click)) : null,
@@ -1986,15 +2005,30 @@
     </div>`;
   }
 
+  function destroyAllPromoChartInstances() {
+    for (const st of Object.values(promoBlockState)) {
+      st.chartInstances.forEach(c => c.destroy());
+      st.chartInstances = [];
+    }
+    promoCompareState.chartInstances.forEach(c => c.destroy());
+    promoCompareState.chartInstances = [];
+  }
+
   // Rebuilds the whole selected-promo list from scratch on every add/remove, but
   // SKIPS recompute for ids already in promoBlockState - otherwise adding a 2nd promo
   // would blow away the 1st promo's dropdown choices and any already-generated comment.
+  // 1개 선택: 기존 단일 기획전 딥다이브(막대+라인 혼합 차트, 도넛). 2개 이상: 공유
+  // 비교 차트(라인 하나 + 매체 그룹 막대) + 비교 코멘트로 전환한다 - 선택 개수가
+  // 바뀔 때마다(추가/삭제) 이 함수가 다시 호출되므로, 비교 코멘트도 그때마다
+  // 새로 생성해야 하는 상태로 초기화된다 (매체 성과 섹션의 목표 전환과 동일한 원칙).
   function renderPromoAnalysisList() {
     const chipsEl = document.getElementById("promoSelectedChips");
     const bodyEl = document.getElementById("promoAnalysisBody");
     if (!chipsEl || !bodyEl || !promoAnalysisState) return;
 
     chipsEl.innerHTML = promoSelections.map(p => `<span class="promo-chip">${esc(p.brand)} · ${esc(p.promo)}<button type="button" class="promo-chip-remove" data-remove-id="${p.id}" aria-label="선택 해제">×</button></span>`).join("");
+
+    destroyAllPromoChartInstances();
 
     if (!promoSelections.length) {
       bodyEl.innerHTML = `<p class="empty-note">기획전을 검색해서 선택하면 분석이 표시됩니다. 여러 개를 선택할 수 있습니다.</p>`;
@@ -2013,11 +2047,19 @@
       };
     }
 
-    bodyEl.innerHTML = (promoSelections.length >= 2 ? buildPromoCompareTableHtml() : "") + promoSelections.map(promoBlockHtml).join("");
-    for (const p of promoSelections) {
+    if (promoSelections.length === 1) {
+      const p = promoSelections[0];
+      bodyEl.innerHTML = promoBlockHtml(p);
       renderPromoCharts(p.id);
       renderPromoCommentArea(p.id);
+      return;
     }
+
+    // 2개 이상 - 비교 모드. 선택 집합이 바뀌었으므로 이전 비교 코멘트/후속 대화는
+    // 더 이상 지금 선택과 맞지 않다 - 초기화한다.
+    promoCompareState.chat = null;
+    bodyEl.innerHTML = buildPromoCompareTableHtml() + buildPromoCompareChartsHtml();
+    renderPromoCompareCharts();
   }
 
   function renderPromoCharts(id) {
@@ -2104,6 +2146,123 @@
         }));
       }
     }
+  }
+
+  // media -> per-promo value, for the compare mode's grouped bar chart - reuses
+  // computePromoMediaShare (unchanged) per selected promo instead of a new calc,
+  // then reshapes into one Chart.js dataset per promo over the union of media.
+  function computePromoMediaGroupedData(metricKey) {
+    const { rowsA, rowsB } = promoAnalysisState;
+    const perPromo = promoSelections.map(p => ({ p, shares: computePromoMediaShare(rowsA, rowsB, p.brand, p.promo, metricKey) }));
+    const mediaTotals = new Map();
+    for (const { shares } of perPromo) {
+      for (const s of shares) mediaTotals.set(s.media, (mediaTotals.get(s.media) || 0) + s.value);
+    }
+    const mediaOrder = [...mediaTotals.entries()].sort((a, b) => b[1] - a[1]).map(([media]) => media);
+    const datasets = perPromo.map(({ p, shares }, i) => {
+      const byMedia = new Map(shares.map(s => [s.media, s.value]));
+      return {
+        label: `${p.brand} · ${p.promo}`,
+        data: mediaOrder.map(media => byMedia.get(media) || 0),
+        backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length],
+      };
+    });
+    return { labels: mediaOrder, datasets };
+  }
+
+  function buildPromoCompareChartsHtml() {
+    const metricOptionsHtml = PROMO_METRIC_OPTIONS.map(m => `<option value="${m.key}"${m.key === promoCompareState.metric ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+    const mediaMetricOptionsHtml = PROMO_DONUT_METRICS.map(m => `<option value="${m.key}"${m.key === promoCompareState.mediaMetric ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+    return `<div class="promo-compare-block">
+      <div class="promo-charts-grid">
+        <div class="chart-block">
+          <div class="chart-controls">
+            <p class="subhead">기획전별 추이 비교</p>
+            <select id="promoCompareMetricSelect" class="top-metric-select">${metricOptionsHtml}</select>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="promoCompareLineChart"></canvas></div>
+        </div>
+        <div class="chart-block">
+          <div class="chart-controls">
+            <p class="subhead">매체별 비교</p>
+            <select id="promoCompareMediaMetricSelect" class="top-metric-select">${mediaMetricOptionsHtml}</select>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="promoCompareMediaChart"></canvas></div>
+        </div>
+      </div>
+      <div class="diff-actions">
+        <button type="button" class="run-btn" id="promoCompareCommentBtn">기획전 비교 코멘트 생성</button>
+      </div>
+      <div id="promoCompareCommentBody"></div>
+    </div>`;
+  }
+
+  function renderPromoCompareLineChart() {
+    const canvas = document.getElementById("promoCompareLineChart");
+    if (!canvas || typeof Chart === "undefined") return;
+    const ink = cssVar("--ink-soft") || "#6C6960";
+    const border = cssVar("--border") || "#DDDAD2";
+    const spec = PROMO_METRIC_OPTIONS.find(m => m.key === promoCompareState.metric);
+    const labels = [...promoAnalysisState.weeksA, ...promoAnalysisState.weeksB].map(w => w.label);
+    const datasets = promoSelections.map((p, i) => {
+      const st = promoBlockState[p.id];
+      const perWeek = [...st.weeklyA, ...st.weeklyB].map(computePromoWeekMetrics);
+      const color = CHART_PALETTE[i % CHART_PALETTE.length];
+      return {
+        type: "line", label: `${p.brand} · ${p.promo}`, data: perWeek.map(m => m[spec.key]),
+        borderColor: color, backgroundColor: color, pointBackgroundColor: color,
+        tension: 0.25, spanGaps: true, pointRadius: 3,
+      };
+    });
+    promoCompareState.chartInstances.push(new Chart(canvas.getContext("2d"), {
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: ink } },
+          tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y == null ? "-" : spec.fmt(ctx.parsed.y)}` } },
+        },
+        scales: {
+          x: { ticks: { color: ink, maxRotation: 60, minRotation: 30 }, grid: { display: false } },
+          y: { ticks: { color: ink }, grid: { color: border } },
+        },
+      },
+    }));
+  }
+
+  function renderPromoCompareMediaChart() {
+    const canvas = document.getElementById("promoCompareMediaChart");
+    if (!canvas || typeof Chart === "undefined") return;
+    const ink = cssVar("--ink-soft") || "#6C6960";
+    const border = cssVar("--border") || "#DDDAD2";
+    const metricSpec = PROMO_DONUT_METRICS.find(m => m.key === promoCompareState.mediaMetric);
+    const { labels, datasets } = computePromoMediaGroupedData(promoCompareState.mediaMetric);
+    if (!labels.length) {
+      canvas.closest(".chart-canvas-wrap").innerHTML = `<p class="empty-note">데이터가 없습니다.</p>`;
+      return;
+    }
+    promoCompareState.chartInstances.push(new Chart(canvas.getContext("2d"), {
+      type: "bar",
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: ink } },
+          tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${metricSpec.fmt(ctx.parsed.y)}` } },
+        },
+        scales: {
+          x: { ticks: { color: ink }, grid: { display: false } },
+          y: { ticks: { color: ink }, grid: { color: border } },
+        },
+      },
+    }));
+  }
+
+  function renderPromoCompareCharts() {
+    promoCompareState.chartInstances.forEach(c => c.destroy());
+    promoCompareState.chartInstances = [];
+    renderPromoCompareLineChart();
+    renderPromoCompareMediaChart();
   }
 
   function buildPromoCommentPayload(brand, promo, st) {
@@ -2195,6 +2354,81 @@
       document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
       st.chat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
       st.chat.displayTurns.push({ role: "model", leads: body.leads });
+    } catch (err) {
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
+  }
+
+  // Reuses buildPromoCommentPayload per selected promo (unchanged) and wraps them
+  // as items[] with mode:"compare" - same endpoint as the single-promo comment,
+  // api/monthly-promo-comment.js branches on payload.mode server-side.
+  function buildPromoCompareCommentPayload() {
+    const items = promoSelections.map(p => buildPromoCommentPayload(p.brand, p.promo, promoBlockState[p.id]));
+    return { mode: "compare", monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB, items };
+  }
+
+  function renderPromoCompareCommentArea() {
+    const bodyEl = document.getElementById("promoCompareCommentBody");
+    if (!bodyEl || !promoCompareState.chat) return;
+    const [first, ...rest] = promoCompareState.chat.displayTurns;
+    bodyEl.innerHTML = `
+      ${renderMonthlyLeadsHtml(first.leads)}
+      ${inlineFollowupHtml("promoCompareFollowup", "예: 이 중 ROAS가 가장 좋은 기획전은?")}`;
+    const histEl = document.getElementById("promoCompareFollowupHistory");
+    if (histEl && rest.length) {
+      histEl.innerHTML = rest.map(t => t.role === "user"
+        ? `<div class="qa-bubble user">${esc(t.text)}</div>`
+        : `<div class="qa-bubble model">${renderMonthlyLeadsHtml(t.leads)}</div>`
+      ).join("");
+    }
+  }
+
+  async function generatePromoCompareComment() {
+    if (promoSelections.length < 2) return;
+    const btn = document.getElementById("promoCompareCommentBtn");
+    const bodyEl = document.getElementById("promoCompareCommentBody");
+    btn.disabled = true;
+    bodyEl.innerHTML = commentLoadingHtml();
+    const payload = buildPromoCompareCommentPayload();
+    try {
+      const res = await fetch("/api/monthly-promo-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      promoCompareState.chat = {
+        payload,
+        history: [{ role: "model", content: leadsToPlainText(body.leads) }],
+        displayTurns: [{ role: "model", leads: body.leads }],
+      };
+      renderPromoCompareCommentArea();
+    } catch (err) {
+      bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function submitPromoCompareFollowup(question) {
+    if (!promoCompareState.chat) return;
+    const historyEl = document.getElementById("promoCompareFollowupHistory");
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    promoCompareState.chat.history.push({ role: "user", content: question });
+    promoCompareState.chat.displayTurns.push({ role: "user", text: question });
+    const loadingId = "pcf-loading-" + Math.random().toString(36).slice(2);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    try {
+      const res = await fetch("/api/monthly-promo-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...promoCompareState.chat.payload, question, history: promoCompareState.chat.history.slice(0, -1) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
+      promoCompareState.chat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
+      promoCompareState.chat.displayTurns.push({ role: "model", leads: body.leads });
     } catch (err) {
       document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
     }
@@ -2485,6 +2719,12 @@
       }
     } else if (e.target.id === "monthlyMediaGoalSelect") {
       renderMonthlyMediaPerformance(e.target.value);
+    } else if (e.target.id === "promoCompareMetricSelect") {
+      promoCompareState.metric = e.target.value;
+      renderPromoCompareCharts();
+    } else if (e.target.id === "promoCompareMediaMetricSelect") {
+      promoCompareState.mediaMetric = e.target.value;
+      renderPromoCompareCharts();
     }
   });
   monthlySectionsEl.addEventListener("click", (e) => {
@@ -2509,6 +2749,10 @@
       generatePromoComment(Number(promoCommentBtn.dataset.promoId));
     } else if (promoFollowupToggleMatch) {
       toggleInlinePanel(`promoFollowup${promoFollowupToggleMatch[1]}Panel`);
+    } else if (e.target.id === "promoCompareCommentBtn") {
+      generatePromoCompareComment();
+    } else if (e.target.id === "promoCompareFollowupToggle") {
+      toggleInlinePanel("promoCompareFollowupPanel");
     }
   });
   monthlySectionsEl.addEventListener("input", (e) => {
@@ -2531,6 +2775,11 @@
     if (e.target.id === "monthlyMediaFollowupForm") {
       e.preventDefault();
       submitFromInlineChat("monthlyMediaFollowupInput", submitMonthlyMediaFollowup);
+      return;
+    }
+    if (e.target.id === "promoCompareFollowupForm") {
+      e.preventDefault();
+      submitFromInlineChat("promoCompareFollowupInput", submitPromoCompareFollowup);
       return;
     }
     const m = e.target.id.match(/^promoFollowup(\d+)Form$/);
