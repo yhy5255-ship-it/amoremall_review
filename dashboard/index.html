@@ -92,6 +92,10 @@
       </div>
 
       <button class="run-btn" id="monthlyRunBtn" disabled><span class="step-num" style="background:#fff; color:var(--accent);">2</span>월간 분석 시작</button>
+
+      <div class="rail-actions">
+        <button class="copy-btn" id="monthlyQaToggleBtn" disabled>AI에게 물어보기</button>
+      </div>
     </div>
 
     <details class="pipeline">
@@ -175,6 +179,37 @@
     <form id="qaForm" class="qa-form">
       <textarea id="qaInput" rows="2" placeholder="예: 이번주 매출이 가장 많이 빠진 기획전이 뭐야?"></textarea>
       <button type="submit" id="qaSendBtn" class="qa-send-btn">전송</button>
+    </form>
+  </aside>
+
+  <aside id="monthlyQaPanel" class="qa-panel">
+    <div class="qa-panel-head">
+      <h3>월간 리뷰에 대해 물어보기</h3>
+      <button type="button" id="monthlyQaCloseBtn" class="qa-close-btn" aria-label="닫기">✕</button>
+    </div>
+    <p class="qa-panel-hint">현재 로드된 A/B월의 원본 데이터를 근거로 답합니다. 데이터에 없는 내용은 "모릅니다"라고 답할 수 있습니다.</p>
+
+    <div class="qa-ref-bar">
+      <button type="button" id="monthlyQaRefBtn" class="retry-btn">📎 참고 자료 선택</button>
+      <div id="monthlyQaRefChips" class="promo-chip-row"></div>
+    </div>
+    <div id="monthlyQaRefPicker" class="qa-ref-picker" style="display:none;">
+      <div class="qa-ref-picker-head">
+        <p class="field-hint">서비스 계정에 공유된 시트 목록 (실시간 조회)</p>
+        <button type="button" id="monthlyQaRefRefreshBtn" class="shortcut-btn">⟳ 새로고침</button>
+      </div>
+      <div id="monthlyQaRefSheetList" class="qa-ref-sheet-list"></div>
+      <div id="monthlyQaRefTabList" class="qa-ref-tab-list"></div>
+      <div class="qa-ref-picker-actions">
+        <button type="button" class="run-btn" id="monthlyQaRefApplyBtn" disabled>적용</button>
+        <button type="button" class="retry-btn" id="monthlyQaRefCancelBtn">취소</button>
+      </div>
+    </div>
+
+    <div id="monthlyQaHistory" class="qa-history"></div>
+    <form id="monthlyQaForm" class="qa-form">
+      <textarea id="monthlyQaInput" rows="2" placeholder="예: 이번 달 매출이 가장 많이 오른 매체가 뭐야?"></textarea>
+      <button type="submit" id="monthlyQaSendBtn" class="qa-send-btn">전송</button>
     </form>
   </aside>
 </div>

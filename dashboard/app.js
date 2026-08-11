@@ -389,27 +389,36 @@
     return rows;
   }
 
-  function deltaMeta(valA, valB) {
+  // isPct: true when the metric itself is already a percentage (ROAS/CTR/CVR/...) -
+  // its "증감" must be the plain point difference (%p, via the same fmtPP convention
+  // deltaSpan's "pp" unit already uses), never a relative %-of-%. Going 1000%→1230%
+  // is "+230%p", not "+23%" - the latter reads as a small change when it's actually huge.
+  function deltaMeta(valA, valB, isPct) {
     const d = valB - valA;
     const cls = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
     const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
     let pct = "";
-    if (valA !== 0) pct = `${d >= 0 ? "+" : ""}${Math.round((d / valA) * 100)}%`;
-    else if (valB !== 0) pct = "신규";
+    if (isPct) {
+      if (d !== 0) pct = fmtPP(d);
+    } else if (valA !== 0) {
+      pct = `${d >= 0 ? "+" : ""}${Math.round((d / valA) * 100)}%`;
+    } else if (valB !== 0) {
+      pct = "신규";
+    }
     return { cls, arrow, pct };
   }
 
   // Generic "A값 → B값 (▲/▼증감%)" table cell, built on deltaMeta - used by the
   // monthly promo-compare table (and reusable anywhere else an A/B table cell is needed).
-  function abCellHtml(valA, valB, fmt) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB);
+  function abCellHtml(valA, valB, fmt, isPct) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `${fmt(valA)} → ${fmt(valB)}${pctText}`;
   }
 
   // headline metric (GMV/ROAS): big current value + small "이전 A값 (증감)" line underneath
-  function mediaHeadlineStat(label, valA, valB, fmt) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB);
+  function mediaHeadlineStat(label, valA, valB, fmt, isPct) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct);
     return `<div class="m-stat">
       <div class="m-primary"><span class="k">${label}</span><span class="v">${fmt(valB)}</span></div>
       <div class="m-secondary"><span class="k">${arrow} 이전 ${fmt(valA)}</span><span class="v delta ${cls}">${pct}</span></div>
@@ -449,7 +458,7 @@
       return `<div class="media-card">
         <div class="m-name">${esc(media)}</div>
         ${mediaHeadlineStat("GMV", a.gmv, b.gmv, fmtWonAbbrev)}
-        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct)}
+        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct, true)}
         <hr>
         ${subRows}
       </div>`;
@@ -799,6 +808,21 @@
     </li>`).join("")}</ul>`;
   }
 
+  // Monthly review's simpler lead/detail shape ({title, details:string[]}, no basis -
+  // there's no 특이사항 메모 input in this flow to distinguish note-grounded from
+  // data-grounded) - same bold-lead + indented-detail visual language as the weekly
+  // report's renderLeadsHtml, reusing the same .comment CSS and highlightBrackets.
+  function renderMonthlyLeadsHtml(leads) {
+    return `<div class="comment"><ul>${leads.map(lead => `<li><b class="lead">${esc(lead.title)}</b>
+      <ul>${(lead.details || []).map(d => `<li>${highlightBrackets(esc(stripLeadingBullet(d))).replace(/\n/g, "<br>")}</li>`).join("")}</ul>
+    </li>`).join("")}</ul></div>`;
+  }
+  // Flattened to plain text for the multi-turn "history" sent back to the API -
+  // Gemini's contents expect a text string per turn, not the structured leads object.
+  function leadsToPlainText(leads) {
+    return leads.map(l => `${l.title}\n${(l.details || []).map(d => "- " + d).join("\n")}`).join("\n\n");
+  }
+
   function renderComments(json) {
     lastComments = json; // {sections: [{tag, leads}]} - kept for the copy button, KPF already spliced in
     for (const tag of SECTION_TAGS) {
@@ -1125,6 +1149,12 @@
     monthlyRail.style.display = mode === "monthly" ? "" : "none";
     weeklyMain.style.display = mode === "weekly" ? "" : "none";
     monthlyMain.style.display = mode === "monthly" ? "" : "none";
+    // Both panels share the same fixed on-screen position - closing whichever one
+    // might be open avoids an orphaned panel from the other mode staying visible.
+    document.getElementById("qaPanel").classList.remove("open");
+    document.getElementById("qaToggleBtn").classList.remove("active");
+    document.getElementById("monthlyQaPanel").classList.remove("open");
+    document.getElementById("monthlyQaToggleBtn").classList.remove("active");
   }
 
   function populateMonthSelects() {
@@ -1170,6 +1200,8 @@
     monthlyIdleState.style.display = "none";
     monthlyReportState.style.display = "block";
     monthlySectionsEl.innerHTML = buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
+    resetMonthlyQaPanel();
+    document.getElementById("monthlyQaToggleBtn").disabled = false;
   }
 
   // ---------- section 3: 이달 캠페인 세팅 변화 (campaign/group setting diff) ----------
@@ -1340,8 +1372,8 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-      settingDiffChat = { items: itemsForApi, history: [{ role: "model", content: body.text }] };
-      bodyEl.innerHTML = settingDiffCommentHtml(body.text);
+      settingDiffChat = { items: itemsForApi, history: [{ role: "model", content: leadsToPlainText(body.leads) }] };
+      bodyEl.innerHTML = settingDiffCommentHtml(body.leads);
       renderSettingDiffPerfTable(items);
     } catch (err) {
       bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
@@ -1364,9 +1396,9 @@
       </div>`;
   }
 
-  function settingDiffCommentHtml(text) {
+  function settingDiffCommentHtml(leads) {
     return `
-      <div class="comment"><p>${esc(text).replace(/\n/g, "<br>")}</p></div>
+      ${renderMonthlyLeadsHtml(leads)}
       <div id="settingDiffPerfTable"></div>
       ${inlineFollowupHtml("settingDiffFollowup", "예: 이 중 지출이 가장 큰 신규 캠페인은?")}`;
   }
@@ -1436,8 +1468,8 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${esc(body.text).replace(/\n/g, "<br>")}</div>`;
-      settingDiffChat.history.push({ role: "model", content: body.text });
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
+      settingDiffChat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
     } catch (err) {
       document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
     }
@@ -1452,6 +1484,17 @@
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
+
+  // The UI's own accent tokens (--accent/--accent-2/../--ink-soft) are deliberately
+  // muted and close to each other in hue/lightness ("최소 강조" palette) - great for
+  // text, bad for telling chart series apart. Charts get their own fixed, vivid,
+  // clearly-distinguishable palette instead of reusing those tokens; same set for
+  // both light/dark since data-viz colors don't need to track the theme the way
+  // text/background tokens do, as long as they read against both plot backgrounds.
+  const CHART_PALETTE = [
+    "#4C6EF5", "#F76707", "#37B24D", "#E64980", "#7048E8",
+    "#F59F00", "#0CA678", "#E03131", "#1098AD", "#845EF7",
+  ];
 
   // Selectable metrics for the weekly chart's bar/line axes - both dropdowns share
   // this same pool, so either axis can show any of the 10.
@@ -1650,7 +1693,7 @@
         <td>${esc(p.brand)} · ${esc(p.promo)}</td>
         <td>${abCellHtml(totA.spend, totB.spend, fmtWon)}</td>
         <td>${abCellHtml(totA.gmv, totB.gmv, fmtWonAbbrev)}</td>
-        <td>${abCellHtml(roasA, roasB, fmtPct)}</td>
+        <td>${abCellHtml(roasA, roasB, fmtPct, true)}</td>
         <td>${abCellHtml(totA.firstPurchase, totB.firstPurchase, fmtCount)}</td>
         <td>${fpCpaCell}</td>
         <td>${abCellHtml(totA.signup, totB.signup, fmtCount)}</td>
@@ -1706,11 +1749,9 @@
     if (typeof Chart === "undefined") return;
 
     const ink = cssVar("--ink-soft") || "#6C6960";
-    const accent = cssVar("--accent") || "#57524A";
     const border = cssVar("--border") || "#DDDAD2";
     const surface = cssVar("--surface") || "#FFFFFF";
-    const donutPalette = ["--ink", "--accent", "--accent-2", "--accent-3", "--accent-4", "--ink-soft", "--border"]
-      .map(v => cssVar(v)).filter(Boolean);
+    const barColor = CHART_PALETTE[0], lineColor = CHART_PALETTE[1];
     Chart.defaults.color = ink;
     Chart.defaults.font.family = cssVar("--font-kr") || undefined;
 
@@ -1724,8 +1765,8 @@
         data: {
           labels: weekly.map(w => w.label),
           datasets: [
-            { type: "bar", label: barSpec.label, data: perWeek.map(m => m[barSpec.key]), backgroundColor: ink, borderRadius: 3, yAxisID: "yBar", order: 2 },
-            { type: "line", label: lineSpec.label, data: perWeek.map(m => m[lineSpec.key]), borderColor: accent, backgroundColor: accent, pointBackgroundColor: accent, yAxisID: "yLine", tension: 0.25, spanGaps: true, order: 1, pointRadius: 3 },
+            { type: "bar", label: barSpec.label, data: perWeek.map(m => m[barSpec.key]), backgroundColor: barColor, borderRadius: 3, yAxisID: "yBar", order: 2 },
+            { type: "line", label: lineSpec.label, data: perWeek.map(m => m[lineSpec.key]), borderColor: lineColor, backgroundColor: lineColor, pointBackgroundColor: lineColor, yAxisID: "yLine", tension: 0.25, spanGaps: true, order: 1, pointRadius: 3 },
           ],
         },
         options: {
@@ -1763,7 +1804,7 @@
             labels: st.mediaShare.map(m => m.media),
             datasets: [{
               data: st.mediaShare.map(m => m.value),
-              backgroundColor: st.mediaShare.map((_, i) => donutPalette[i % donutPalette.length]),
+              backgroundColor: st.mediaShare.map((_, i) => CHART_PALETTE[i % CHART_PALETTE.length]),
               borderColor: surface, borderWidth: 2,
             }],
           },
@@ -1805,18 +1846,24 @@
     };
   }
 
+  // st.chat.history is the flattened plain-text log sent back to the API each turn;
+  // st.chat.displayTurns keeps the ORIGINAL structured leads per model turn (plain
+  // text alone can't be re-rendered as bold-lead+details when this area gets rebuilt,
+  // e.g. after adding another promo to the selection).
   function renderPromoCommentArea(id) {
     const st = promoBlockState[id];
     const bodyEl = document.getElementById(`promoCommentBody-${id}`);
     if (!st || !bodyEl || !st.chat) return;
+    const [first, ...rest] = st.chat.displayTurns;
     bodyEl.innerHTML = `
-      <div class="comment"><p>${esc(st.chat.history[0].content).replace(/\n/g, "<br>")}</p></div>
+      ${renderMonthlyLeadsHtml(first.leads)}
       ${inlineFollowupHtml(`promoFollowup${id}`, "예: 이 기획전의 매체별 성과 차이가 큰 이유는?")}`;
     const histEl = document.getElementById(`promoFollowup${id}History`);
-    if (histEl && st.chat.history.length > 1) {
-      histEl.innerHTML = st.chat.history.slice(1)
-        .map(h => `<div class="qa-bubble ${h.role === "user" ? "user" : "model"}">${esc(h.content).replace(/\n/g, "<br>")}</div>`)
-        .join("");
+    if (histEl && rest.length) {
+      histEl.innerHTML = rest.map(t => t.role === "user"
+        ? `<div class="qa-bubble user">${esc(t.text)}</div>`
+        : `<div class="qa-bubble model">${renderMonthlyLeadsHtml(t.leads)}</div>`
+      ).join("");
     }
   }
 
@@ -1836,7 +1883,11 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-      st.chat = { payload, history: [{ role: "model", content: body.text }] };
+      st.chat = {
+        payload,
+        history: [{ role: "model", content: leadsToPlainText(body.leads) }],
+        displayTurns: [{ role: "model", leads: body.leads }],
+      };
       renderPromoCommentArea(id);
     } catch (err) {
       bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
@@ -1851,6 +1902,7 @@
     const historyEl = document.getElementById(`promoFollowup${id}History`);
     historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
     st.chat.history.push({ role: "user", content: question });
+    st.chat.displayTurns.push({ role: "user", text: question });
     const loadingId = `pf-loading-${id}-` + Math.random().toString(36).slice(2);
     historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
     historyEl.scrollTop = historyEl.scrollHeight;
@@ -1861,10 +1913,221 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${esc(body.text).replace(/\n/g, "<br>")}</div>`;
-      st.chat.history.push({ role: "model", content: body.text });
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
+      st.chat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
+      st.chat.displayTurns.push({ role: "model", leads: body.leads });
     } catch (err) {
       document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
+  }
+
+  // ---------- section 5: 월간 리뷰 "AI에게 물어보기" (free-form chat, reuses .qa-panel) ----------
+  let monthlyQaHistory = [];
+  let monthlyQaChartInstances = [];
+
+  // Monthly A/B pools are already month-aggregated (a few hundred rows at most,
+  // unlike weekly Q&A's potentially-multi-tab raw pool), so unlike api/qa.js this
+  // skips keyword-based scoping and context caching entirely - just send it all
+  // every turn. Still precomputes goal totals so sum questions are a lookup, not
+  // the model mentally adding rows (same reasoning as weekly's computeQaTotals).
+  function computeMonthlyQaTotals(groupsA, groupsB) {
+    const totals = {};
+    for (const goal of GOAL_ORDER) {
+      const gA = groupsA.filter(g => g.goal === goal), gB = groupsB.filter(g => g.goal === goal);
+      if (!gA.length && !gB.length) continue;
+      totals[goal] = {
+        spendA: sum(gA, "spend"), spendB: sum(gB, "spend"),
+        gmvA: sum(gA, "gmv"), gmvB: sum(gB, "gmv"),
+        firstPurchaseA: sum(gA, "firstPurchase"), firstPurchaseB: sum(gB, "firstPurchase"),
+        signupA: sum(gA, "signup"), signupB: sum(gB, "signup"),
+        installA: sum(gA, "install"), installB: sum(gB, "install"),
+      };
+    }
+    return totals;
+  }
+
+  function buildMonthlyQaContext() {
+    const keep = g => !SETTING_DIFF_EXCLUDED_RAW_MEDIA.includes(g.rawMedia);
+    return {
+      totals: computeMonthlyQaTotals(monthlyState.groupsA, monthlyState.groupsB),
+      groups: [
+        ...monthlyState.groupsA.map(g => ({ ...g, period: "A" })),
+        ...monthlyState.groupsB.map(g => ({ ...g, period: "B" })),
+      ],
+      campaignGroups: [
+        ...monthlyState.campaignGroupsA.filter(keep).map(g => ({ ...g, period: "A" })),
+        ...monthlyState.campaignGroupsB.filter(keep).map(g => ({ ...g, period: "B" })),
+      ],
+    };
+  }
+
+  function resetMonthlyQaPanel() {
+    monthlyQaHistory = [];
+    monthlyQaChartInstances.forEach(c => c.destroy());
+    monthlyQaChartInstances = [];
+    const historyEl = document.getElementById("monthlyQaHistory");
+    if (historyEl) historyEl.innerHTML = "";
+    clearMonthlyQaRef();
+    document.getElementById("monthlyQaRefPicker").style.display = "none";
+  }
+
+  // ---------- section 6: "참고 자료 선택" - live Drive API sheet discovery, no local config ----------
+  let monthlyQaReference = null; // {spreadsheetId, sheetName, tabs, content, label}, null until "적용"
+  let monthlyQaRefSelectedSheet = null; // {id, name} - highlighted in the picker, before "적용"
+
+  function renderMonthlyQaRefChip() {
+    const chipsEl = document.getElementById("monthlyQaRefChips");
+    if (!chipsEl) return;
+    chipsEl.innerHTML = monthlyQaReference
+      ? `<span class="promo-chip">📎 참고 중: ${esc(monthlyQaReference.label)}<button type="button" class="promo-chip-remove" id="monthlyQaRefClear" aria-label="지우기">×</button></span>`
+      : "";
+  }
+
+  function clearMonthlyQaRef() {
+    monthlyQaReference = null;
+    monthlyQaRefSelectedSheet = null;
+    renderMonthlyQaRefChip();
+  }
+
+  async function loadMonthlyQaRefSheets() {
+    const listEl = document.getElementById("monthlyQaRefSheetList");
+    listEl.innerHTML = `<p class="empty-note">불러오는 중...</p>`;
+    document.getElementById("monthlyQaRefTabList").innerHTML = "";
+    document.getElementById("monthlyQaRefApplyBtn").disabled = true;
+    monthlyQaRefSelectedSheet = null;
+    try {
+      const res = await fetch("/api/monthly-reference", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "listSheets" }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const sheets = body.sheets || [];
+      listEl.innerHTML = sheets.length
+        ? sheets.map(s => `<div class="qa-ref-sheet-item" data-id="${esc(s.id)}" data-name="${esc(s.name)}">${esc(s.name)}<span class="meta">${esc((s.modifiedTime || "").slice(0, 10))}</span></div>`).join("")
+        : `<p class="empty-note">공유된 시트가 없습니다. amore-weekly-robot@optical-psyche-468005-b6.iam.gserviceaccount.com 을 리뷰 시트에 뷰어로 초대하세요.</p>`;
+    } catch (err) {
+      listEl.innerHTML = `<p class="ai-error">시트 목록을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    }
+  }
+
+  async function loadMonthlyQaRefTabs(spreadsheetId) {
+    const listEl = document.getElementById("monthlyQaRefTabList");
+    listEl.innerHTML = `<p class="empty-note">탭 목록 불러오는 중...</p>`;
+    document.getElementById("monthlyQaRefApplyBtn").disabled = true;
+    try {
+      const res = await fetch("/api/monthly-reference", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "listTabs", spreadsheetId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const tabs = body.tabs || [];
+      listEl.innerHTML = tabs.length
+        ? tabs.map(t => `<label class="checkrow"><input type="checkbox" class="monthly-qa-ref-tab-cb" value="${esc(t)}"> ${esc(t)}</label>`).join("")
+        : `<p class="empty-note">탭을 찾을 수 없습니다.</p>`;
+    } catch (err) {
+      listEl.innerHTML = `<p class="ai-error">탭 목록을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    }
+  }
+
+  async function applyMonthlyQaRef() {
+    if (!monthlyQaRefSelectedSheet) return;
+    const checked = [...document.querySelectorAll(".monthly-qa-ref-tab-cb:checked")].map(cb => cb.value);
+    if (!checked.length) return;
+    const applyBtn = document.getElementById("monthlyQaRefApplyBtn");
+    const origText = applyBtn.textContent;
+    applyBtn.disabled = true;
+    applyBtn.textContent = "불러오는 중...";
+    try {
+      const res = await fetch("/api/monthly-reference", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "fetchContent", spreadsheetId: monthlyQaRefSelectedSheet.id, tabs: checked }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      monthlyQaReference = {
+        spreadsheetId: monthlyQaRefSelectedSheet.id, sheetName: monthlyQaRefSelectedSheet.name,
+        tabs: checked, content: body.content || "",
+        label: `${monthlyQaRefSelectedSheet.name} · ${checked.join(", ")}`,
+      };
+      renderMonthlyQaRefChip();
+      document.getElementById("monthlyQaRefPicker").style.display = "none";
+    } catch (err) {
+      alert(`참고 자료를 가져오지 못했습니다.\n${String((err && err.message) || err)}`);
+    } finally {
+      applyBtn.disabled = false;
+      applyBtn.textContent = origText;
+    }
+  }
+
+  // Renders an optional small Chart.js chart the model chose to attach to its answer -
+  // same CHART_PALETTE as the PROMO section's charts, sized to fit inside a chat bubble.
+  function renderMonthlyQaChart(canvasId, chartData) {
+    if (typeof Chart === "undefined") return;
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ink = cssVar("--ink-soft") || "#6C6960";
+    const type = ["line", "doughnut"].includes(chartData.type) ? chartData.type : "bar";
+    const datasets = (chartData.datasets || []).map((d, i) => ({
+      label: d.label || "", data: d.data || [],
+      backgroundColor: type === "doughnut" ? (d.data || []).map((_, j) => CHART_PALETTE[j % CHART_PALETTE.length]) : CHART_PALETTE[i % CHART_PALETTE.length],
+      borderColor: CHART_PALETTE[i % CHART_PALETTE.length],
+    }));
+    monthlyQaChartInstances.push(new Chart(canvas.getContext("2d"), {
+      type,
+      data: { labels: chartData.labels || [], datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: ink, boxWidth: 10, font: { size: 10.5 } } } },
+        scales: type === "doughnut" ? {} : {
+          x: { ticks: { color: ink, font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: ink, font: { size: 10 } } },
+        },
+      },
+    }));
+  }
+
+  async function submitMonthlyQaQuestion(question) {
+    const historyEl = document.getElementById("monthlyQaHistory");
+    const sendBtn = document.getElementById("monthlyQaSendBtn");
+    if (!historyEl || !monthlyState) return;
+
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    const loadingId = `mqa-pending-${monthlyQaHistory.length}`;
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    sendBtn.disabled = true;
+
+    const priorHistory = monthlyQaHistory.slice();
+    try {
+      const res = await fetch("/api/monthly-qa", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          monthALabel: monthlyState.labelA, monthBLabel: monthlyState.labelB,
+          history: priorHistory, question, ...buildMonthlyQaContext(),
+          reference: monthlyQaReference ? { label: monthlyQaReference.label, content: monthlyQaReference.content } : null,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const answer = body.answer || "(빈 응답)";
+      monthlyQaHistory.push({ role: "user", content: question }, { role: "model", content: answer });
+      const bubble = document.getElementById(loadingId);
+      if (bubble) {
+        bubble.classList.remove("qa-loading-bubble");
+        const chartId = `${loadingId}-chart`;
+        bubble.innerHTML = esc(answer).replace(/\n/g, "<br>") + qaTableHtml(body.table)
+          + (body.chartData ? `<div class="qa-chart-wrap"><canvas id="${chartId}"></canvas></div>` : "");
+        if (body.chartData) renderMonthlyQaChart(chartId, body.chartData);
+      }
+    } catch (err) {
+      const bubble = document.getElementById(loadingId);
+      const msg = String((err && err.message) || err);
+      if (bubble) { bubble.classList.remove("qa-loading-bubble"); bubble.classList.add("qa-error-bubble"); bubble.textContent = `답변을 가져오지 못했습니다. (${msg})`; }
+    } finally {
+      sendBtn.disabled = false;
+      historyEl.scrollTop = historyEl.scrollHeight;
     }
   }
 
@@ -1891,6 +2154,11 @@
   const qaCloseBtn = document.getElementById("qaCloseBtn");
   const qaForm = document.getElementById("qaForm");
   const qaInput = document.getElementById("qaInput");
+  const monthlyQaPanel = document.getElementById("monthlyQaPanel");
+  const monthlyQaToggleBtn = document.getElementById("monthlyQaToggleBtn");
+  const monthlyQaCloseBtn = document.getElementById("monthlyQaCloseBtn");
+  const monthlyQaForm = document.getElementById("monthlyQaForm");
+  const monthlyQaInput = document.getElementById("monthlyQaInput");
 
   // Compare-toggle checkboxes, metric dropdowns, and the AI retry button are re-created
   // on every run, so wire them once via event delegation.
@@ -2233,6 +2501,45 @@
       if (!question || !qaContext) return;
       qaInput.value = "";
       submitQaQuestion(question);
+    });
+    monthlyQaToggleBtn.addEventListener("click", () => {
+      monthlyQaPanel.classList.toggle("open");
+      monthlyQaToggleBtn.classList.toggle("active", monthlyQaPanel.classList.contains("open"));
+    });
+    monthlyQaCloseBtn.addEventListener("click", () => {
+      monthlyQaPanel.classList.remove("open");
+      monthlyQaToggleBtn.classList.remove("active");
+    });
+    monthlyQaForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const question = monthlyQaInput.value.trim();
+      if (!question || !monthlyState) return;
+      monthlyQaInput.value = "";
+      submitMonthlyQaQuestion(question);
+    });
+    document.getElementById("monthlyQaRefBtn").addEventListener("click", () => {
+      document.getElementById("monthlyQaRefPicker").style.display = "flex";
+      loadMonthlyQaRefSheets();
+    });
+    document.getElementById("monthlyQaRefRefreshBtn").addEventListener("click", loadMonthlyQaRefSheets);
+    document.getElementById("monthlyQaRefCancelBtn").addEventListener("click", () => {
+      document.getElementById("monthlyQaRefPicker").style.display = "none";
+    });
+    document.getElementById("monthlyQaRefApplyBtn").addEventListener("click", applyMonthlyQaRef);
+    document.getElementById("monthlyQaRefSheetList").addEventListener("click", (e) => {
+      const item = e.target.closest(".qa-ref-sheet-item[data-id]");
+      if (!item) return;
+      document.querySelectorAll("#monthlyQaRefSheetList .qa-ref-sheet-item").forEach(el => el.classList.remove("active"));
+      item.classList.add("active");
+      monthlyQaRefSelectedSheet = { id: item.dataset.id, name: item.dataset.name };
+      loadMonthlyQaRefTabs(item.dataset.id);
+    });
+    document.getElementById("monthlyQaRefTabList").addEventListener("change", () => {
+      const anyChecked = !!document.querySelector(".monthly-qa-ref-tab-cb:checked");
+      document.getElementById("monthlyQaRefApplyBtn").disabled = !anyChecked;
+    });
+    document.getElementById("monthlyQaRefChips").addEventListener("click", (e) => {
+      if (e.target.id === "monthlyQaRefClear") clearMonthlyQaRef();
     });
     document.getElementById("copyBtn").addEventListener("click", async () => {
       const btn = document.getElementById("copyBtn");
