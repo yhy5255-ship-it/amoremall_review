@@ -1,9 +1,15 @@
 "use strict";
 /*
   Vercel serverless function backing the "완료 시 Slack 알림" checkbox. Posts the
-  finished AI comment (same plain text the "코멘트 복사" button copies) to a fixed
-  Slack channel via a bot token, so someone can start an analysis and step away
-  without needing to keep the tab open to know when it's done.
+  finished AI comment to a fixed Slack channel via a bot token, so someone can
+  start an analysis and step away without needing to keep the tab open to know
+  when it's done.
+
+  Two-stage post: a short completion message in the channel, then the actual
+  comment (app.js's commentsToSlackText() - mrkdwn, no code-block wrapping so
+  Slack actually renders the bold headers) as a THREAD REPLY on it. A long
+  comment inline made the channel history hard to scan; the thread keeps the
+  channel itself to one short line per run.
 
   SLACK_BOT_TOKEN lives only in the server environment (.env.local locally, a
   Vercel project env var once deployed) - the browser never sees it, same
@@ -12,6 +18,20 @@
 */
 
 const CHANNEL_ID = "C08812X9QG0";
+
+async function postMessage(text, threadTs) {
+  const body = { channel: CHANNEL_ID, text };
+  if (threadTs) body.thread_ts = threadTs;
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+    },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
 
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
@@ -30,23 +50,19 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const slackRes = await fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
-      },
-      body: JSON.stringify({
-        channel: CHANNEL_ID,
-        text: `*코멘트 작성이 완료되었습니다*\n\n\`\`\`\n${text}\n\`\`\``,
-      }),
-    });
-    const slackBody = await slackRes.json();
     // Slack's Web API returns HTTP 200 even on failure - the real success flag is `ok`.
-    if (!slackBody.ok) {
-      res.status(502).json({ error: `Slack API 오류: ${slackBody.error || "unknown"}` });
+    const first = await postMessage("코멘트 작성이 완료되었습니다");
+    if (!first.ok) {
+      res.status(502).json({ error: `Slack API 오류: ${first.error || "unknown"}` });
       return;
     }
+
+    const second = await postMessage(text, first.ts);
+    if (!second.ok) {
+      res.status(502).json({ error: `Slack API 오류: ${second.error || "unknown"}` });
+      return;
+    }
+
     res.status(200).json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String((err && err.message) || err) });

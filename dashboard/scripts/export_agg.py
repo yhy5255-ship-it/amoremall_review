@@ -123,10 +123,16 @@ def export_tab(tab_name):
         first_purchase_rev = num(col("첫구매 매출", r))
         signup = num(col("회원가입", r))                  # BH
 
+        # optimization (AO, "Product / optimization") is part of the key, not just a
+        # stored field - two rows that otherwise share a key but differ only by this
+        # value would silently merge into one row and lose one of the two values,
+        # which breaks the "new media/optimization this week" detection in app.js
+        # (it needs every distinct value that ever appeared, not just the last one).
+        optimization = col("Product / optimization", r)
         key = (
             date, col("Channel", r), goal, col("Media", r),
             col("브랜드", r), col("기획전명", r), col("기획전 상태", r),
-            col("기획전 시작날짜", r), col("기획전 종료날짜", r),
+            col("기획전 시작날짜", r), col("기획전 종료날짜", r), optimization,
         )
         g = groups.get(key)
         if g is None:
@@ -135,6 +141,7 @@ def export_tab(tab_name):
                 "media": col("Media", r), "brand": col("브랜드", r),
                 "promo": col("기획전명", r), "status": col("기획전 상태", r),
                 "promoStart": col("기획전 시작날짜", r), "promoEnd": col("기획전 종료날짜", r),
+                "optimization": optimization,
                 "spend": 0.0, "gmv": 0.0, "impr": 0.0, "click": 0.0, "views": 0.0,
                 "firstPurchase": 0.0, "firstPurchaseRev": 0.0, "signup": 0.0,
                 "install": 0.0, "purchaseConv": 0.0,

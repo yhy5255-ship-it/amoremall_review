@@ -92,6 +92,26 @@
   }
   function topByGmv(list, n) { return [...list].sort((a, b) => b.gmv - a.gmv).slice(0, n); }
   function topByField(list, field, n) { return [...list].filter(p => p[field] > 0).sort((a, b) => b[field] - a[field]).slice(0, n); }
+
+  // Reads from raw DATA_CURRENT.groups (day-level, unaggregated), NOT the already
+  // A/B-aggregated groupsA/groupsB - aggregateGroupsByDateRange's key doesn't include
+  // "optimization", so by the time a row reaches groupsA/groupsB, distinct
+  // optimization values sharing every other dimension would already be silently
+  // collapsed into one row. Reading raw rows here preserves every distinct value.
+  function computeNewValues(rawGroups, startA, endA, startB, endB, goal, field) {
+    const inRange = (g, start, end) => g.goal === goal && g.date >= start && g.date <= end;
+    const setA = new Set(rawGroups.filter(g => inRange(g, startA, endA)).map(g => g[field]).filter(Boolean));
+    const rowsB = rawGroups.filter(g => inRange(g, startB, endB));
+    const newValues = [...new Set(rowsB.map(g => g[field]).filter(Boolean))].filter(v => !setA.has(v));
+    return newValues.map(v => {
+      const matched = rowsB.filter(g => g[field] === v);
+      const spend = sum(matched, "spend"), gmv = sum(matched, "gmv");
+      return {
+        value: v, spend, gmv, roas: roas(gmv, spend),
+        install: sum(matched, "install"), firstPurchase: sum(matched, "firstPurchase"), signup: sum(matched, "signup"),
+      };
+    });
+  }
   const promoKey = (p) => (p.brand || "") + "||" + p.promo;
 
   // Iterates the UNION of A's and B's promo keys, not just B's - a promo that fully
@@ -545,10 +565,15 @@
     };
   }
 
-  // KPF highlights are a cumulative, fully-deterministic log of every KPF send in this
-  // tab (not scoped to the selected week), in chronological order - never AI-generated.
+  // KPF highlights are a cumulative, fully-deterministic log of every KPF send in the
+  // calendar MONTH B(금주) falls in (not just that week, and not the full loaded tab
+  // pool either - a multi-tab load would otherwise carry over unrelated months'
+  // sends), in chronological order - never AI-generated. If that month's tab isn't
+  // loaded, this naturally returns null below and the lead is simply omitted.
   function buildKpfLead() {
-    const kpfHi = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF"))
+    const yearMonth = (dateBEnd.value || "").slice(0, 7); // "2026-08"
+    if (!yearMonth) return null;
+    const kpfHi = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF" && g.date && g.date.slice(0, 7) === yearMonth))
       .sort((a, b) => (a.promoStart || "").localeCompare(b.promoStart || ""));
     if (!kpfHi.length) return null;
     return {
@@ -848,15 +873,19 @@
   // ---------- plain-text export (for copy button) - built from the same JSON as the HTML ----------
   // [INSIGHT] (우수 기획전 TOP5) stays visible on screen but is intentionally left out of
   // the copied text - the copy button is for the 매출/신규가입/앱설치/트래픽 comments only.
-  function commentsToPlainText() {
+  // Shared by commentsToPlainText() (코멘트 복사 - unchanged output) and
+  // commentsToSlackText() (Slack thread reply - mrkdwn bold on headers/lead titles
+  // only, per the "just structural headers, not the bullet bodies" scope this was
+  // built to). formatHeader/formatLeadTitle are the only two lines that differ.
+  function buildCommentsText(formatHeader, formatLeadTitle) {
     let out = "";
     if (lastComments) {
       for (const tag of SECTION_TAGS) {
         const section = lastComments.sections.find(s => s.tag === tag);
         if (!section || !section.leads.length) continue;
-        out += `[${tag}]\n`;
+        out += `${formatHeader(tag)}\n`;
         for (const lead of section.leads) {
-          out += `l  ${lead.title}\n`;
+          out += `${formatLeadTitle(lead.title)}\n`;
           for (const detail of lead.details) {
             // Plain-text export stays basis-badge-free - the dots are a screen-only aid.
             // stripLeadingBullet() avoids a doubled "·  · ..." if the model included one itself.
@@ -869,6 +898,14 @@
       }
     }
     return out.trim();
+  }
+  function commentsToPlainText() {
+    return buildCommentsText(tag => `[${tag}]`, title => `l  ${title}`);
+  }
+  // Slack mrkdwn - bold on section headers and lead titles only (not bullet bodies,
+  // since auto-bolding specific numbers inside free text risks mis-highlighting).
+  function commentsToSlackText() {
+    return buildCommentsText(tag => `*[${tag}]*`, title => `*${title}*`);
   }
 
   // ---------- AI call ----------
@@ -909,13 +946,14 @@
   }
 
   // "완료 시 Slack 알림 받기" - fires once the report comment successfully renders (not
-  // on failure, since there's nothing useful to report yet). Reuses commentsToPlainText()
-  // so the Slack message matches the "코멘트 복사" button byte-for-byte.
+  // on failure, since there's nothing useful to report yet). Uses commentsToSlackText()
+  // (mrkdwn bold headers) - the "코멘트 복사" button keeps commentsToPlainText() instead,
+  // since Slack's own formatting has no place in a copy-pasted plain-text comment.
   async function notifySlackIfEnabled() {
     const checkbox = document.getElementById("slackNotifyCheckbox");
     const status = document.getElementById("slackNotifyStatus");
     if (!checkbox || !checkbox.checked) return;
-    const text = commentsToPlainText();
+    const text = commentsToSlackText();
     if (!text.trim()) return; // nothing to send (e.g. comment fetch itself failed)
     status.textContent = "전송 중...";
     status.classList.remove("error");
@@ -2426,6 +2464,15 @@
     const signup = buildSignupSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
     const app = buildAppSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
     const traffic = buildTrafficSection(groupsA, groupsB, weekARange, weekBRange, weekALabel, weekBLabel);
+
+    // 이번 주(B)에 새로 등장한 매체/Product-optimization을 목표별로 짚어줄 근거 - AI
+    // 코멘트 프롬프트에만 쓰이고 화면 UI에는 노출되지 않는다. traffic.promptData는
+    // 트래픽 목표 데이터가 없으면 null이라 그때는 건너뛴다.
+    for (const [goal, section] of [["매출", rev], ["신규가입", signup], ["앱설치", app], ["트래픽", traffic]]) {
+      if (!section.promptData) continue;
+      section.promptData.newMedia = computeNewValues(DATA_CURRENT.groups, startA, endA, startB, endB, goal, "media");
+      section.promptData.newOptimization = computeNewValues(DATA_CURRENT.groups, startA, endA, startB, endB, goal, "optimization");
+    }
 
     sectionsEl.innerHTML = buildMediaPerformanceSection(groupsA, groupsB) + rev.html + signup.html + app.html + traffic.html;
     initDetailBlocks();

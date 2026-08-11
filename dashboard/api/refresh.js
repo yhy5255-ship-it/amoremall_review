@@ -126,12 +126,16 @@ function aggregateTab(tabName, rows) {
 
     const channel = col("Channel", r), media = col("Media", r), brand = col("브랜드", r), promo = col("기획전명", r);
     const status = col("기획전 상태", r), promoStart = col("기획전 시작날짜", r), promoEnd = col("기획전 종료날짜", r);
+    // optimization (AO, "Product / optimization") is part of the key, not just a
+    // stored field - see export_agg.py's comment on the same line for why (silent
+    // merge of distinct optimization values would break app.js's new-value detection).
+    const optimization = col("Product / optimization", r);
 
-    const key = [date, channel, goal, media, brand, promo, status, promoStart, promoEnd].join("||");
+    const key = [date, channel, goal, media, brand, promo, status, promoStart, promoEnd, optimization].join("||");
     let g = groups.get(key);
     if (!g) {
       g = {
-        date, weekLabel, channel, goal, media, brand, promo, status, promoStart, promoEnd,
+        date, weekLabel, channel, goal, media, brand, promo, status, promoStart, promoEnd, optimization,
         spend: 0, gmv: 0, impr: 0, click: 0, views: 0,
         firstPurchase: 0, firstPurchaseRev: 0, signup: 0, install: 0, purchaseConv: 0,
       };
