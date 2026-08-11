@@ -350,12 +350,26 @@ details.detail summary{cursor:pointer; font-size:12.5px; color:var(--ink-soft); 
 .media-card hr{border:none; border-top:1px solid var(--border); margin:10px 0;}
 .media-card .m-sub-row{display:flex; justify-content:space-between; gap:8px; font-size:11.5px; margin-top:5px; color:var(--ink);}
 .media-card .m-sub-row .lbl{color:var(--ink-soft); flex:none;}
-.media-card .cell-na{color:var(--ink-soft);}
+.cell-na{color:var(--ink-soft);}
 .media-detail-toggle{margin-top:14px;}
-.media-detail-table td:nth-child(2){text-align:left;}
-.media-detail-table td[rowspan]{vertical-align:top; font-weight:600;}
+.media-detail-table th:nth-child(2), .media-detail-table td:nth-child(2){text-align:left;}
+.media-detail-table td[rowspan]{vertical-align:top; font-weight:600; background:var(--surface-2);}
 .media-detail-table tr.detail-total-row{font-weight:700;}
 .media-detail-table tr.detail-total-row td{border-top:2px solid var(--border);}
+/* group-header row (성과/설치/첫구매/회원가입/트래픽) - centered, smaller than the
+   individual metric labels below it; "매체"/"Product/최적화" rowspan into both header
+   rows so they keep their normal left-aligned look instead of the group centering. */
+.media-detail-table thead tr:first-child th:not([rowspan]){text-align:center; font-size:10px;}
+/* every data cell is now 2 lines ("dc-primary" big + "dc-secondary" small below) so
+   row heights stay naturally even across the whole table - just keep both lines
+   tight and give the secondary line its own (lighter, smaller, non-bold) styling. */
+.media-detail-table td{vertical-align:middle; line-height:1.35;}
+.media-detail-table .dc-primary{font-weight:700; font-size:12.5px;}
+.media-detail-table .dc-secondary{font-size:11px; color:var(--ink-soft); font-weight:400; margin-top:2px;}
+.media-detail-table .dc-secondary .delta{font-weight:600;}
+.media-detail-table tr.detail-total-row .dc-secondary{color:var(--ink-soft);}
+/* light separation between one media's optimization rows and the next media's. */
+.media-detail-table tr.media-group-start > td{border-top:2px solid var(--border);}
 
 /* ---------- Q&A side panel ---------- */
 #qaToggleBtn.active{background:var(--surface-3); color:var(--ink); border-color:var(--accent);}

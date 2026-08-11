@@ -409,13 +409,34 @@
     return rows;
   }
 
+  // Whether an INCREASE in a given metric is good, bad, or neither - shared by the
+  // MEDIA card summary and its "자세히 보기" detail table so both color deltas by
+  // what the number MEANS, not by raw direction (a rising CPA is bad even though
+  // the value itself went up). Metrics not listed here (e.g. the 기획전 비교 table's
+  // cells, which don't pass a metricKey at all) keep the old raw-direction coloring -
+  // this only changes callers that explicitly opt in with a metricKey.
+  const METRIC_GOOD_DIRECTION = {
+    roas: "up", install: "up", gmv: "up", firstPurchase: "up", signup: "up", click: "up", ctr: "up",
+    cpi: "down", firstPurchaseCpa: "down", signupCpa: "down", cpc: "down",
+    spend: "neutral",
+  };
+  function metricColorClass(metricKey, dir) {
+    if (dir === "flat" || !metricKey) return dir;
+    const goodDir = METRIC_GOOD_DIRECTION[metricKey];
+    if (!goodDir || goodDir === "neutral") return "flat";
+    return dir === goodDir ? "up" : "down";
+  }
+
   // isPct: true when the metric itself is already a percentage (ROAS/CTR/CVR/...) -
   // its "증감" must be the plain point difference (%p, via the same fmtPP convention
   // deltaSpan's "pp" unit already uses), never a relative %-of-%. Going 1000%→1230%
   // is "+230%p", not "+23%" - the latter reads as a small change when it's actually huge.
-  function deltaMeta(valA, valB, isPct) {
+  // metricKey (optional): remaps the raw increase/decrease direction to a good/bad
+  // color via METRIC_GOOD_DIRECTION above; omit it to keep plain "up=green" coloring.
+  function deltaMeta(valA, valB, isPct, metricKey) {
     const d = valB - valA;
-    const cls = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
+    const dir = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
+    const cls = metricColorClass(metricKey, dir);
     const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
     let pct = "";
     if (isPct) {
@@ -430,15 +451,15 @@
 
   // Generic "A값 → B값 (▲/▼증감%)" table cell, built on deltaMeta - used by the
   // monthly promo-compare table (and reusable anywhere else an A/B table cell is needed).
-  function abCellHtml(valA, valB, fmt, isPct) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct);
+  function abCellHtml(valA, valB, fmt, isPct, metricKey) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `${fmt(valA)} → ${fmt(valB)}${pctText}`;
   }
 
   // headline metric (GMV/ROAS): big current value + small "이전 A값 (증감)" line underneath
-  function mediaHeadlineStat(label, valA, valB, fmt, isPct) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct);
+  function mediaHeadlineStat(label, valA, valB, fmt, isPct, metricKey) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
     return `<div class="m-stat">
       <div class="m-primary"><span class="k">${label}</span><span class="v">${fmt(valB)}</span></div>
       <div class="m-secondary"><span class="k">${arrow} 이전 ${fmt(valA)}</span><span class="v delta ${cls}">${pct}</span></div>
@@ -451,9 +472,19 @@
     if (opts.na) {
       return `<div class="m-sub-row"><span class="lbl">${label}</span><span class="cell-na">${opts.na}</span></div>`;
     }
-    const { cls, arrow, pct } = deltaMeta(valA, valB);
+    const { cls, arrow, pct } = deltaMeta(valA, valB, false, opts.metricKey);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `<div class="m-sub-row"><span class="lbl">${label}</span><span>${fmt(valA)} → ${fmt(valB)}${pctText}</span></div>`;
+  }
+
+  // 2-line "현재값(B) 크게 + 이전 A값·증감 작게" cell body - same visual hierarchy
+  // mediaHeadlineStat's card stat block already uses (big value, small "이전 값 +
+  // 증감" line below), reused here for the detail table instead of abCellHtml's
+  // single-line "A → B (증감)" so the table reads the same way the cards above it do.
+  function detailCellHtml(valA, valB, fmt, isPct, metricKey) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
+    const pctText = pct ? ` <span class="delta ${cls}">${pct === "신규" ? "(신규)" : pct}</span>` : "";
+    return `<div class="dc-primary">${fmt(valB)}</div><div class="dc-secondary">${arrow} 이전 ${fmt(valA)}${pctText}</div>`;
   }
 
   // Like groupByMedia but split one level further by Product/optimization (AO열) -
@@ -517,10 +548,11 @@
     return { mediaGroups, totalA, totalB };
   }
 
-  // One "A값 → B값 (▲/▼증감%)" row of the 12 detail-table metrics for a given
-  // media's (or the TOTAL row's, when media is null) a/b totals - reuses abCellHtml
-  // (already used by the monthly promo-compare table) for every cell instead of
-  // reimplementing the compare-cell format.
+  // One 2-line detailCellHtml() cell per detail-table metric, for a given media's
+  // (or the TOTAL row's, when media is null) a/b totals - column order matches the
+  // 5 group headers below (성과/설치/첫구매/회원가입/트래픽), each cell colored by
+  // what an increase in THAT metric means (metricKey -> METRIC_GOOD_DIRECTION),
+  // not by raw direction.
   function mediaDetailRowCells(media, a, b) {
     const naAll = media && UNSUPPORTED_FP_SU_MEDIA.includes(media);
     const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
@@ -530,26 +562,39 @@
     const cpcValid = a.click > 0 && b.click > 0;
     const ctrValid = a.impr > 0 && b.impr > 0;
     const ctrA = ctrValid ? (a.click / a.impr * 100) : 0, ctrB = ctrValid ? (b.click / b.impr * 100) : 0;
-    const na = "(수집 불가)";
+    const na = `<span class="cell-na">(수집 불가)</span>`;
+    const dash = `<span class="cell-na">-</span>`;
     return `
-      <td>${abCellHtml(a.spend, b.spend, fmtWon)}</td>
-      <td>${abCellHtml(roasA, roasB, fmtPct, true)}</td>
-      <td>${abCellHtml(a.install, b.install, fmtCount)}</td>
-      <td>${cpiValid ? abCellHtml(a.spend / a.install, b.spend / b.install, fmtWon) : "-"}</td>
-      <td>${abCellHtml(a.gmv, b.gmv, fmtWon)}</td>
-      <td>${naAll ? na : abCellHtml(a.firstPurchase, b.firstPurchase, fmtCount)}</td>
-      <td>${naAll ? na : (fpCpaValid ? abCellHtml(a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon) : "-")}</td>
-      <td>${naAll ? na : abCellHtml(a.signup, b.signup, fmtCount)}</td>
-      <td>${naAll ? na : (suCpaValid ? abCellHtml(a.spend / a.signup, b.spend / b.signup, fmtWon) : "-")}</td>
-      <td>${abCellHtml(a.click, b.click, fmtCount)}</td>
-      <td>${cpcValid ? abCellHtml(a.spend / a.click, b.spend / b.click, fmtWon) : "-"}</td>
-      <td>${ctrValid ? abCellHtml(ctrA, ctrB, fmtPct, true) : "-"}</td>`;
+      <td>${detailCellHtml(a.spend, b.spend, fmtWon, false, "spend")}</td>
+      <td>${detailCellHtml(roasA, roasB, fmtPct, true, "roas")}</td>
+      <td>${detailCellHtml(a.gmv, b.gmv, fmtWon, false, "gmv")}</td>
+      <td>${detailCellHtml(a.install, b.install, fmtCount, false, "install")}</td>
+      <td>${cpiValid ? detailCellHtml(a.spend / a.install, b.spend / b.install, fmtWon, false, "cpi") : dash}</td>
+      <td>${naAll ? na : detailCellHtml(a.firstPurchase, b.firstPurchase, fmtCount, false, "firstPurchase")}</td>
+      <td>${naAll ? na : (fpCpaValid ? detailCellHtml(a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon, false, "firstPurchaseCpa") : dash)}</td>
+      <td>${naAll ? na : detailCellHtml(a.signup, b.signup, fmtCount, false, "signup")}</td>
+      <td>${naAll ? na : (suCpaValid ? detailCellHtml(a.spend / a.signup, b.spend / b.signup, fmtWon, false, "signupCpa") : dash)}</td>
+      <td>${detailCellHtml(a.click, b.click, fmtCount, false, "click")}</td>
+      <td>${cpcValid ? detailCellHtml(a.spend / a.click, b.spend / b.click, fmtWon, false, "cpc") : dash}</td>
+      <td>${ctrValid ? detailCellHtml(ctrA, ctrB, fmtPct, true, "ctr") : dash}</td>`;
   }
 
+  // 2-row header: a group-label row (colspan per group) over the 12 individual
+  // metric labels, grouped 성과/설치/첫구매/회원가입/트래픽 - column order in both
+  // this header and mediaDetailRowCells above must match.
   const MEDIA_DETAIL_HEAD = `<tr>
-    <th>매체</th><th>Product/최적화</th>
-    <th>광고비</th><th>ROAS</th><th>설치</th><th>CPI</th><th>매출</th>
-    <th>첫구매</th><th>첫구매CPA</th><th>회원가입</th><th>회원가입CPA</th>
+    <th rowspan="2">매체</th><th rowspan="2">Product/최적화</th>
+    <th colspan="3">성과</th>
+    <th colspan="2">설치</th>
+    <th colspan="2">첫구매</th>
+    <th colspan="2">회원가입</th>
+    <th colspan="3">트래픽</th>
+  </tr>
+  <tr>
+    <th>광고비</th><th>ROAS</th><th>매출</th>
+    <th>설치</th><th>CPI</th>
+    <th>첫구매고객수</th><th>첫구매CPA</th>
+    <th>회원가입</th><th>회원가입CPA</th>
     <th>클릭</th><th>CPC</th><th>CTR</th>
   </tr>`;
 
@@ -560,8 +605,11 @@
     const { mediaGroups, totalA, totalB } = computeMediaOptimizationDetail(rawGroupsA, rawGroupsB, goal);
     if (!mediaGroups.length) return `<p class="empty-note">상세 데이터가 없습니다.</p>`;
 
-    const bodyRows = mediaGroups.map(({ media, rows }) => rows.map((r, i) => `
-      <tr>
+    // media-group-start marks each group's first row (skipping the very first group,
+    // right under the header already has its own divider) so CSS can add a little
+    // extra separation between one media's optimization rows and the next media's.
+    const bodyRows = mediaGroups.map(({ media, rows }, gi) => rows.map((r, i) => `
+      <tr${i === 0 && gi > 0 ? ` class="media-group-start"` : ""}>
         ${i === 0 ? `<td rowspan="${rows.length}">${esc(media)}</td>` : ""}
         <td>${esc(r.optimization)}</td>
         ${mediaDetailRowCells(media, r.a, r.b)}
@@ -590,16 +638,16 @@
       const fpCpaValid = !naAll && a.firstPurchase > 0 && b.firstPurchase > 0;
       const suCpaValid = !naAll && a.signup > 0 && b.signup > 0;
       const subRows = [
-        mediaSubRowHtml("첫구매", a.firstPurchase, b.firstPurchase, fmtCount, { na: naAll ? "(수집 불가)" : null }),
-        mediaSubRowHtml("첫구매 CPA", a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon, { na: naAll ? "(수집 불가)" : (fpCpaValid ? null : "-") }),
-        mediaSubRowHtml("회원가입", a.signup, b.signup, fmtCount, { na: naAll ? "(수집 불가)" : null }),
-        mediaSubRowHtml("가입 CPA", a.spend / a.signup, b.spend / b.signup, fmtWon, { na: naAll ? "(수집 불가)" : (suCpaValid ? null : "-") }),
+        mediaSubRowHtml("첫구매", a.firstPurchase, b.firstPurchase, fmtCount, { na: naAll ? "(수집 불가)" : null, metricKey: "firstPurchase" }),
+        mediaSubRowHtml("첫구매 CPA", a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon, { na: naAll ? "(수집 불가)" : (fpCpaValid ? null : "-"), metricKey: "firstPurchaseCpa" }),
+        mediaSubRowHtml("회원가입", a.signup, b.signup, fmtCount, { na: naAll ? "(수집 불가)" : null, metricKey: "signup" }),
+        mediaSubRowHtml("가입 CPA", a.spend / a.signup, b.spend / b.signup, fmtWon, { na: naAll ? "(수집 불가)" : (suCpaValid ? null : "-"), metricKey: "signupCpa" }),
       ].join("");
 
       return `<div class="media-card">
         <div class="m-name">${esc(media)}</div>
-        ${mediaHeadlineStat("GMV", a.gmv, b.gmv, fmtWonAbbrev)}
-        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct, true)}
+        ${mediaHeadlineStat("GMV", a.gmv, b.gmv, fmtWonAbbrev, false, "gmv")}
+        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct, true, "roas")}
         <hr>
         ${subRows}
       </div>`;
