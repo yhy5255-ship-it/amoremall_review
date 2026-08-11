@@ -40,7 +40,11 @@
   const fmtWon = (n) => Math.round(n).toLocaleString() + "원";
   const fmtPct = (n) => Math.round(n) + "%";               // ROAS etc. - integer, no decimals
   const fmtPct2 = (n) => n.toFixed(2) + "%";                 // CTR/CVR-style rates - 2 decimals
-  const fmtPP = (n) => (n > 0 ? "+" : "") + Math.round(n) + "%p";
+  // decimals: for a small-magnitude %-of-% metric (CTR/CVR-style, typically single
+  // digits) rounding to a whole %p hides every real change (0.11%p -> "+0%p") -
+  // pass 2 there; omit it (ROAS-style, typically hundreds of %) to keep the whole-
+  // number %p this always used before.
+  const fmtPP = (n, decimals) => (n > 0 ? "+" : "") + n.toFixed(decimals || 0) + "%p";
   const fmtCount = (n) => Math.round(n).toLocaleString() + "건";
   const fmtNum = (n) => Math.round(n).toLocaleString();
   const fmtDate = (d) => { if (!d || d === "상시") return d || ""; const p = d.split("-"); return `${+p[1]}/${+p[2]}`; };
@@ -433,14 +437,15 @@
   // is "+230%p", not "+23%" - the latter reads as a small change when it's actually huge.
   // metricKey (optional): remaps the raw increase/decrease direction to a good/bad
   // color via METRIC_GOOD_DIRECTION above; omit it to keep plain "up=green" coloring.
-  function deltaMeta(valA, valB, isPct, metricKey) {
+  // ppDecimals (optional): decimal places for the %p delta text - see fmtPP above.
+  function deltaMeta(valA, valB, isPct, metricKey, ppDecimals) {
     const d = valB - valA;
     const dir = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
     const cls = metricColorClass(metricKey, dir);
     const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
     let pct = "";
     if (isPct) {
-      if (d !== 0) pct = fmtPP(d);
+      if (d !== 0) pct = fmtPP(d, ppDecimals);
     } else if (valA !== 0) {
       pct = `${d >= 0 ? "+" : ""}${Math.round((d / valA) * 100)}%`;
     } else if (valB !== 0) {
@@ -451,8 +456,8 @@
 
   // Generic "A값 → B값 (▲/▼증감%)" table cell, built on deltaMeta - used by the
   // monthly promo-compare table (and reusable anywhere else an A/B table cell is needed).
-  function abCellHtml(valA, valB, fmt, isPct, metricKey) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
+  function abCellHtml(valA, valB, fmt, isPct, metricKey, ppDecimals) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey, ppDecimals);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `${fmt(valA)} → ${fmt(valB)}${pctText}`;
   }
@@ -461,13 +466,13 @@
   // see MEDIA_CARD_GOAL_LAYOUT): big current value + small "이전 A값 (증감)" line
   // underneath. naOverride (e.g. "(수집 불가)"/"-") replaces the whole stat with a
   // flat label + muted text when a metric can't be shown for this media/period.
-  function mediaHeadlineStat(label, valA, valB, fmt, isPct, metricKey, naOverride) {
+  function mediaHeadlineStat(label, valA, valB, fmt, isPct, metricKey, naOverride, ppDecimals) {
     if (naOverride) {
       return `<div class="m-stat">
         <div class="m-primary"><span class="k">${label}</span><span class="v cell-na">${naOverride}</span></div>
       </div>`;
     }
-    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey, ppDecimals);
     return `<div class="m-stat">
       <div class="m-primary"><span class="k">${label}</span><span class="v">${fmt(valB)}</span></div>
       <div class="m-secondary"><span class="k">${arrow} 이전 ${fmt(valA)}</span><span class="v delta ${cls}">${pct}</span></div>
@@ -483,7 +488,7 @@
     if (opts.na) {
       return `<div class="m-sub-row"><span class="lbl">${label}</span><span class="cell-na">${opts.na}</span></div>`;
     }
-    const { cls, arrow, pct } = deltaMeta(valA, valB, !!opts.isPct, opts.metricKey);
+    const { cls, arrow, pct } = deltaMeta(valA, valB, !!opts.isPct, opts.metricKey, opts.ppDecimals);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `<div class="m-sub-row"><span class="lbl">${label}</span><span>${fmt(valA)} → ${fmt(valB)}${pctText}</span></div>`;
   }
@@ -492,8 +497,8 @@
   // mediaHeadlineStat's card stat block already uses (big value, small "이전 값 +
   // 증감" line below), reused here for the detail table instead of abCellHtml's
   // single-line "A → B (증감)" so the table reads the same way the cards above it do.
-  function detailCellHtml(valA, valB, fmt, isPct, metricKey) {
-    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
+  function detailCellHtml(valA, valB, fmt, isPct, metricKey, ppDecimals) {
+    const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey, ppDecimals);
     const pctText = pct ? ` <span class="delta ${cls}">${pct === "신규" ? "(신규)" : pct}</span>` : "";
     return `<div class="dc-primary">${fmt(valB)}</div><div class="dc-secondary">${arrow} 이전 ${fmt(valA)}${pctText}</div>`;
   }
@@ -587,7 +592,7 @@
       <td>${naAll ? na : (suCpaValid ? detailCellHtml(a.spend / a.signup, b.spend / b.signup, fmtWon, false, "signupCpa") : dash)}</td>
       <td>${detailCellHtml(a.click, b.click, fmtCount, false, "click")}</td>
       <td>${cpcValid ? detailCellHtml(a.spend / a.click, b.spend / b.click, fmtWon, false, "cpc") : dash}</td>
-      <td>${ctrValid ? detailCellHtml(ctrA, ctrB, fmtPct2, true, "ctr") : dash}</td>`;
+      <td>${ctrValid ? detailCellHtml(ctrA, ctrB, fmtPct2, true, "ctr", 2) : dash}</td>`;
   }
 
   // 2-row header: a group-label row (colspan per group) over the 12 individual
@@ -648,7 +653,7 @@
     signupCpa:        { label: "가입 CPA",   fmt: fmtWon,       isPct: false, naRestricted: true },
     click:            { label: "클릭수",     fmt: fmtCount,     isPct: false },
     cpc:              { label: "CPC",       fmt: fmtWon,       isPct: false },
-    ctr:              { label: "CTR",       fmt: fmtPct2,      isPct: true },
+    ctr:              { label: "CTR",       fmt: fmtPct2,      isPct: true, ppDecimals: 2 },
   };
 
   // Which metrics show big ("main") vs compact ("sub") on a MEDIA card, per goal -
@@ -686,13 +691,13 @@
     const spec = MEDIA_METRIC_SPEC[key];
     if (naAll && spec.naRestricted) return mediaHeadlineStat(spec.label, 0, 0, spec.fmt, spec.isPct, key, "(수집 불가)");
     const [valA, valB, valid] = mediaMetricAB(key, a, b);
-    return mediaHeadlineStat(spec.label, valA, valB, spec.fmt, spec.isPct, key, valid ? null : "-");
+    return mediaHeadlineStat(spec.label, valA, valB, spec.fmt, spec.isPct, key, valid ? null : "-", spec.ppDecimals);
   }
   function mediaCardSubHtml(key, a, b, naAll) {
     const spec = MEDIA_METRIC_SPEC[key];
     if (naAll && spec.naRestricted) return mediaSubRowHtml(spec.label, 0, 0, spec.fmt, { na: "(수집 불가)" });
     const [valA, valB, valid] = mediaMetricAB(key, a, b);
-    return mediaSubRowHtml(spec.label, valA, valB, spec.fmt, { na: valid ? null : "-", metricKey: key, isPct: spec.isPct });
+    return mediaSubRowHtml(spec.label, valA, valB, spec.fmt, { na: valid ? null : "-", metricKey: key, isPct: spec.isPct, ppDecimals: spec.ppDecimals });
   }
 
   // Card-grid HTML for one goal's A/B media comparison - shared by the weekly MEDIA
