@@ -587,7 +587,7 @@
       <td>${naAll ? na : (suCpaValid ? detailCellHtml(a.spend / a.signup, b.spend / b.signup, fmtWon, false, "signupCpa") : dash)}</td>
       <td>${detailCellHtml(a.click, b.click, fmtCount, false, "click")}</td>
       <td>${cpcValid ? detailCellHtml(a.spend / a.click, b.spend / b.click, fmtWon, false, "cpc") : dash}</td>
-      <td>${ctrValid ? detailCellHtml(ctrA, ctrB, fmtPct, true, "ctr") : dash}</td>`;
+      <td>${ctrValid ? detailCellHtml(ctrA, ctrB, fmtPct2, true, "ctr") : dash}</td>`;
   }
 
   // 2-row header: a group-label row (colspan per group) over the 12 individual
@@ -648,7 +648,7 @@
     signupCpa:        { label: "가입 CPA",   fmt: fmtWon,       isPct: false, naRestricted: true },
     click:            { label: "클릭수",     fmt: fmtCount,     isPct: false },
     cpc:              { label: "CPC",       fmt: fmtWon,       isPct: false },
-    ctr:              { label: "CTR",       fmt: fmtPct,       isPct: true },
+    ctr:              { label: "CTR",       fmt: fmtPct2,      isPct: true },
   };
 
   // Which metrics show big ("main") vs compact ("sub") on a MEDIA card, per goal -
