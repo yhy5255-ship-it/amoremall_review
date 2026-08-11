@@ -73,6 +73,18 @@ async function listSheets(token) {
   return json.files || [];
 }
 
+// Review sheets accumulate a long tail of raw-pull/working tabs (RAW exports,
+// content drafts, meeting notes, media-mix scratch work) alongside the real
+// analysis tabs. Confirmed against a real sheet that Sheets API's own `hidden`
+// flag does NOT line up with which of these the user actually wants (several
+// wanted analysis tabs are hidden=true, e.g. working pivots; a couple of unwanted
+// ones aren't hidden at all) - so this filters by keyword instead. Exclusion-based
+// rather than an allowlist of exact tab names, since the "real" tabs' numbering/
+// wording drifts slightly month to month (e.g. "KPF 분석" is tab "2." one month,
+// "3." the next) - confirmed these keywords cleanly separate wanted from unwanted
+// against two different months' sheets.
+const HIDDEN_TAB_KEYWORDS = ["RAW", "인덱스", "성과비교", "미팅록", "미디어믹스", "콘텐츠"];
+
 async function listTabs(spreadsheetId, token) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -81,7 +93,8 @@ async function listTabs(spreadsheetId, token) {
     throw new Error(`Sheets API ${res.status}${body ? `: ${body}` : ""}`);
   }
   const json = await res.json();
-  return (json.sheets || []).map(s => s.properties.title);
+  const titles = (json.sheets || []).map(s => s.properties.title);
+  return titles.filter(t => !HIDDEN_TAB_KEYWORDS.some(kw => t.includes(kw)));
 }
 
 async function fetchTabValues(spreadsheetId, tab, token) {
