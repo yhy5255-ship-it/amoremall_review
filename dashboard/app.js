@@ -457,8 +457,16 @@
     return `${fmt(valA)} → ${fmt(valB)}${pctText}`;
   }
 
-  // headline metric (GMV/ROAS): big current value + small "이전 A값 (증감)" line underneath
-  function mediaHeadlineStat(label, valA, valB, fmt, isPct, metricKey) {
+  // headline metric (e.g. GMV/ROAS, or whichever metrics a goal designates "main" -
+  // see MEDIA_CARD_GOAL_LAYOUT): big current value + small "이전 A값 (증감)" line
+  // underneath. naOverride (e.g. "(수집 불가)"/"-") replaces the whole stat with a
+  // flat label + muted text when a metric can't be shown for this media/period.
+  function mediaHeadlineStat(label, valA, valB, fmt, isPct, metricKey, naOverride) {
+    if (naOverride) {
+      return `<div class="m-stat">
+        <div class="m-primary"><span class="k">${label}</span><span class="v cell-na">${naOverride}</span></div>
+      </div>`;
+    }
     const { cls, arrow, pct } = deltaMeta(valA, valB, isPct, metricKey);
     return `<div class="m-stat">
       <div class="m-primary"><span class="k">${label}</span><span class="v">${fmt(valB)}</span></div>
@@ -466,13 +474,16 @@
     </div>`;
   }
 
-  // secondary metric row (첫구매/CPA/가입/CPA): compact "A값 → B값 (▲증감%)", or an opts.na override
+  // secondary metric row (any goal's "sub" metrics - see MEDIA_CARD_GOAL_LAYOUT):
+  // compact "A값 → B값 (▲증감%)", or an opts.na override. opts.isPct: true for a
+  // metric that's itself a %(ROAS/CTR) so its delta reads as %p, not a relative % -
+  // needed now that ROAS/CTR can land here instead of always being a headline stat.
   function mediaSubRowHtml(label, valA, valB, fmt, opts) {
     opts = opts || {};
     if (opts.na) {
       return `<div class="m-sub-row"><span class="lbl">${label}</span><span class="cell-na">${opts.na}</span></div>`;
     }
-    const { cls, arrow, pct } = deltaMeta(valA, valB, false, opts.metricKey);
+    const { cls, arrow, pct } = deltaMeta(valA, valB, !!opts.isPct, opts.metricKey);
     const pctText = pct ? ` <span class="delta ${cls}">${arrow}${pct === "신규" ? "(신규)" : `(${pct})`}</span>` : "";
     return `<div class="m-sub-row"><span class="lbl">${label}</span><span>${fmt(valA)} → ${fmt(valB)}${pctText}</span></div>`;
   }
@@ -622,6 +633,68 @@
     </table></div>`;
   }
 
+  // One definition per MEDIA-card metric, shared by both the "main" (headline,
+  // big) and "sub" (compact row) rendering paths below - naRestricted marks the
+  // metrics ASA structurally can't report (same UNSUPPORTED_FP_SU_MEDIA rule the
+  // detail table also uses).
+  const MEDIA_METRIC_SPEC = {
+    gmv:              { label: "GMV",       fmt: fmtWonAbbrev, isPct: false },
+    roas:             { label: "ROAS",      fmt: fmtPct,       isPct: true },
+    install:          { label: "설치수",     fmt: fmtCount,     isPct: false },
+    cpi:              { label: "CPI",       fmt: fmtWon,       isPct: false },
+    firstPurchase:    { label: "첫구매",     fmt: fmtCount,     isPct: false, naRestricted: true },
+    firstPurchaseCpa: { label: "첫구매 CPA", fmt: fmtWon,       isPct: false, naRestricted: true },
+    signup:           { label: "회원가입",   fmt: fmtCount,     isPct: false, naRestricted: true },
+    signupCpa:        { label: "가입 CPA",   fmt: fmtWon,       isPct: false, naRestricted: true },
+    click:            { label: "클릭수",     fmt: fmtCount,     isPct: false },
+    cpc:              { label: "CPC",       fmt: fmtWon,       isPct: false },
+    ctr:              { label: "CTR",       fmt: fmtPct,       isPct: true },
+  };
+
+  // Which metrics show big ("main") vs compact ("sub") on a MEDIA card, per goal -
+  // the one config both the weekly MEDIA section and the monthly review's MEDIA
+  // section read (via the shared buildMediaCardsHtml below), so this never needs a
+  // second copy. CPC/CTR reuse the exact formulas the "자세히 보기" detail table
+  // already defined (mediaMetricAB below), not a new calc.
+  const MEDIA_CARD_GOAL_LAYOUT = {
+    "매출": { main: ["gmv", "roas"], sub: ["firstPurchase", "firstPurchaseCpa", "signup", "signupCpa"] },
+    "신규가입": { main: ["firstPurchase", "firstPurchaseCpa", "signup", "signupCpa"], sub: ["gmv", "roas"] },
+    "앱설치": { main: ["install", "cpi"], sub: ["gmv", "roas", "firstPurchase", "firstPurchaseCpa", "signup", "signupCpa"] },
+    "트래픽": { main: ["click", "cpc", "ctr"], sub: ["gmv", "roas", "firstPurchase", "firstPurchaseCpa", "signup", "signupCpa"] },
+  };
+
+  // [valA, valB, valid] for one metric key from a media's a/b period sums - valid
+  // is false only for a ratio metric (cpi/firstPurchaseCpa/signupCpa/cpc/ctr) when
+  // its denominator is 0 on either side (same "-" convention as elsewhere).
+  function mediaMetricAB(key, a, b) {
+    switch (key) {
+      case "gmv": return [a.gmv, b.gmv, true];
+      case "roas": return [roas(a.gmv, a.spend), roas(b.gmv, b.spend), true];
+      case "install": return [a.install, b.install, true];
+      case "cpi": { const v = a.install > 0 && b.install > 0; return [v ? a.spend / a.install : 0, v ? b.spend / b.install : 0, v]; }
+      case "firstPurchase": return [a.firstPurchase, b.firstPurchase, true];
+      case "firstPurchaseCpa": { const v = a.firstPurchase > 0 && b.firstPurchase > 0; return [v ? a.spend / a.firstPurchase : 0, v ? b.spend / b.firstPurchase : 0, v]; }
+      case "signup": return [a.signup, b.signup, true];
+      case "signupCpa": { const v = a.signup > 0 && b.signup > 0; return [v ? a.spend / a.signup : 0, v ? b.spend / b.signup : 0, v]; }
+      case "click": return [a.click, b.click, true];
+      case "cpc": { const v = a.click > 0 && b.click > 0; return [v ? a.spend / a.click : 0, v ? b.spend / b.click : 0, v]; }
+      case "ctr": { const v = a.impr > 0 && b.impr > 0; return [v ? a.click / a.impr * 100 : 0, v ? b.click / b.impr * 100 : 0, v]; }
+    }
+  }
+
+  function mediaCardMainHtml(key, a, b, naAll) {
+    const spec = MEDIA_METRIC_SPEC[key];
+    if (naAll && spec.naRestricted) return mediaHeadlineStat(spec.label, 0, 0, spec.fmt, spec.isPct, key, "(수집 불가)");
+    const [valA, valB, valid] = mediaMetricAB(key, a, b);
+    return mediaHeadlineStat(spec.label, valA, valB, spec.fmt, spec.isPct, key, valid ? null : "-");
+  }
+  function mediaCardSubHtml(key, a, b, naAll) {
+    const spec = MEDIA_METRIC_SPEC[key];
+    if (naAll && spec.naRestricted) return mediaSubRowHtml(spec.label, 0, 0, spec.fmt, { na: "(수집 불가)" });
+    const [valA, valB, valid] = mediaMetricAB(key, a, b);
+    return mediaSubRowHtml(spec.label, valA, valB, spec.fmt, { na: valid ? null : "-", metricKey: key, isPct: spec.isPct });
+  }
+
   // Card-grid HTML for one goal's A/B media comparison - shared by the weekly MEDIA
   // section (renderMediaPerformance below) and the monthly review's MEDIA section,
   // so both stay byte-for-byte identical without copy-pasting the calculation.
@@ -631,25 +704,18 @@
     const rows = computeMediaPerformance(groupsA, groupsB, goal);
     if (!rows.length) return `<p class="empty-note">이 목표에는 매체 데이터가 없습니다.</p>`;
 
+    const layout = MEDIA_CARD_GOAL_LAYOUT[goal] || MEDIA_CARD_GOAL_LAYOUT["매출"];
     const cards = rows.map(({ media, a, b }) => {
-      const roasA = roas(a.gmv, a.spend), roasB = roas(b.gmv, b.spend);
       // ASA는 매체 구조상 첫구매/회원가입 집계가 원천적으로 불가능하다 (앱설치 섹션과 동일한 규칙).
       const naAll = UNSUPPORTED_FP_SU_MEDIA.includes(media);
-      const fpCpaValid = !naAll && a.firstPurchase > 0 && b.firstPurchase > 0;
-      const suCpaValid = !naAll && a.signup > 0 && b.signup > 0;
-      const subRows = [
-        mediaSubRowHtml("첫구매", a.firstPurchase, b.firstPurchase, fmtCount, { na: naAll ? "(수집 불가)" : null, metricKey: "firstPurchase" }),
-        mediaSubRowHtml("첫구매 CPA", a.spend / a.firstPurchase, b.spend / b.firstPurchase, fmtWon, { na: naAll ? "(수집 불가)" : (fpCpaValid ? null : "-"), metricKey: "firstPurchaseCpa" }),
-        mediaSubRowHtml("회원가입", a.signup, b.signup, fmtCount, { na: naAll ? "(수집 불가)" : null, metricKey: "signup" }),
-        mediaSubRowHtml("가입 CPA", a.spend / a.signup, b.spend / b.signup, fmtWon, { na: naAll ? "(수집 불가)" : (suCpaValid ? null : "-"), metricKey: "signupCpa" }),
-      ].join("");
+      const mainHtml = layout.main.map(key => mediaCardMainHtml(key, a, b, naAll)).join("");
+      const subHtml = layout.sub.map(key => mediaCardSubHtml(key, a, b, naAll)).join("");
 
       return `<div class="media-card">
         <div class="m-name">${esc(media)}</div>
-        ${mediaHeadlineStat("GMV", a.gmv, b.gmv, fmtWonAbbrev, false, "gmv")}
-        ${mediaHeadlineStat("ROAS", roasA, roasB, fmtPct, true, "roas")}
+        <div class="m-main-grid">${mainHtml}</div>
         <hr>
-        ${subRows}
+        ${subHtml}
       </div>`;
     }).join("");
 
