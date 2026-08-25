@@ -817,27 +817,46 @@
     };
   }
 
-  // KPF highlights are a cumulative, fully-deterministic log of every KPF send in the
-  // calendar MONTH B(금주) falls in (not just that week, and not the full loaded tab
-  // pool either - a multi-tab load would otherwise carry over unrelated months'
-  // sends), in chronological order - never AI-generated. If that month's tab isn't
-  // loaded, this naturally returns null below and the lead is simply omitted.
+  // KPF highlights show every KPF promo with any activity in the calendar MONTH
+  // B(금주) falls in (not just that week, and not the full loaded tab pool either -
+  // a multi-tab load would otherwise carry over unrelated months' totals) - that
+  // month's own 구매/매출/ROAS contribution, never AI-generated.
   //
-  // "당월"은 그 소재의 발송일(promoStart)로 판단한다 - 개별 로우의 날짜(g.date)로
-  // 판단하면, 발송은 지난달인데 전환이 이번 달까지 이어지는 소재(예: 라이브방송형
-  // KPF)의 이번 달 전환 로우가 필터를 통과해버려서, 지난달 소재가 발송일 라벨을 단
-  // 채 "이번 달 KPF" 목록에 잘못 섞여 들어간다 - 그룹핑 먼저, 월 필터는 그 다음.
+  // A KPF promo can be sent in one month (기획전 시작날짜/promoStart) and keep
+  // generating conversions for many weeks after (예: 라이브방송형 KPF, 상태 "운영") -
+  // so the date shown is the ACTUAL date range of THIS MONTH's own rows, not the
+  // promo's original send date. Labeling an ongoing promo's fresh this-month
+  // performance with its old send date made it look like stale/leftover data
+  // instead of this month's real activity. A "(발송일 M/D)" note is added only
+  // when the send itself happened in an earlier month, so a genuinely new send
+  // still reads plainly with no redundant annotation.
   function buildKpfLead() {
     const yearMonth = (dateBEnd.value || "").slice(0, 7); // "2026-08"
     if (!yearMonth) return null;
-    const kpfHi = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF"))
-      .filter(p => (p.promoStart || "").slice(0, 7) === yearMonth)
-      .sort((a, b) => (a.promoStart || "").localeCompare(b.promoStart || ""));
+    const monthRows = DATA_CURRENT.groups.filter(g => g.channel === "KPF" && g.date && g.date.slice(0, 7) === yearMonth);
+    if (!monthRows.length) return null;
+
+    const datesByKey = new Map(); // "brand||promo" -> this month's dates for that promo
+    for (const g of monthRows) {
+      const key = (g.brand || "") + "||" + (g.promo || "(미지정)");
+      if (!datesByKey.has(key)) datesByKey.set(key, []);
+      datesByKey.get(key).push(g.date);
+    }
+
+    const kpfHi = groupByPromo(monthRows).map(p => {
+      const dates = (datesByKey.get(p.brand + "||" + (p.promo || "(미지정)")) || []).sort();
+      return Object.assign(p, { rangeStart: dates[0], rangeEnd: dates[dates.length - 1] });
+    }).sort((a, b) => a.rangeStart.localeCompare(b.rangeStart));
     if (!kpfHi.length) return null;
     return {
       title: "매출_KPF 상세성과",
       // AI를 거치지 않는 규칙 기반 리드이므로 basis는 항상 "data" 고정.
-      details: kpfHi.map(p => ({ text: `${fmtDate(p.promoStart)} [${p.brand} · ${p.promo}] 소재 발송, 구매 ${fmtCount(p.purchaseConv)}, 매출 ${fmtWonAbbrev(p.gmv)}, ROAS ${fmtPct(roas(p.gmv, p.spend))} 기록`, basis: "data" })),
+      details: kpfHi.map(p => {
+        const dateLabel = p.rangeStart === p.rangeEnd ? fmtDate(p.rangeStart) : `${fmtDate(p.rangeStart)}~${fmtDate(p.rangeEnd)}`;
+        const sentThisMonth = (p.promoStart || "").slice(0, 7) === yearMonth;
+        const sentNote = sentThisMonth ? "" : ` (발송일 ${fmtDate(p.promoStart)})`;
+        return { text: `${dateLabel} [${p.brand} · ${p.promo}] 구매 ${fmtCount(p.purchaseConv)}, 매출 ${fmtWonAbbrev(p.gmv)}, ROAS ${fmtPct(roas(p.gmv, p.spend))} 기록${sentNote}`, basis: "data" };
+      }),
     };
   }
 
