@@ -822,10 +822,16 @@
   // pool either - a multi-tab load would otherwise carry over unrelated months'
   // sends), in chronological order - never AI-generated. If that month's tab isn't
   // loaded, this naturally returns null below and the lead is simply omitted.
+  //
+  // "당월"은 그 소재의 발송일(promoStart)로 판단한다 - 개별 로우의 날짜(g.date)로
+  // 판단하면, 발송은 지난달인데 전환이 이번 달까지 이어지는 소재(예: 라이브방송형
+  // KPF)의 이번 달 전환 로우가 필터를 통과해버려서, 지난달 소재가 발송일 라벨을 단
+  // 채 "이번 달 KPF" 목록에 잘못 섞여 들어간다 - 그룹핑 먼저, 월 필터는 그 다음.
   function buildKpfLead() {
     const yearMonth = (dateBEnd.value || "").slice(0, 7); // "2026-08"
     if (!yearMonth) return null;
-    const kpfHi = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF" && g.date && g.date.slice(0, 7) === yearMonth))
+    const kpfHi = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF"))
+      .filter(p => (p.promoStart || "").slice(0, 7) === yearMonth)
       .sort((a, b) => (a.promoStart || "").localeCompare(b.promoStart || ""));
     if (!kpfHi.length) return null;
     return {
