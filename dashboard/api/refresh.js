@@ -25,6 +25,13 @@ const DEFAULT_KEY_PATH = "c:\\Users\\wisebirds\\.secrets\\arctic-plate-468205-n6
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ALT_DATE_RE = /^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/;
 
+// Mirrors export_agg.py's SUSPICIOUS_PROMO_RE - a normal 기획전명(AG) is either a
+// "YYMM 4자리 + 설명" name (e.g. "2601상시") or doesn't start with a digit at all;
+// 5+ leading digits usually means a date code got concatenated onto another value
+// with no separator (real case: AG/AE both held "260881주년" - a sheet input
+// error, not something this code produced). Log-only, never alters the value.
+const SUSPICIOUS_PROMO_RE = /^\d{5,}/;
+
 function num(s) {
   if (!s) return 0;
   const n = parseFloat(String(s).replace(/,/g, "").replace(/%/g, ""));
@@ -104,6 +111,7 @@ function aggregateTab(tabName, rows) {
   const promoGroups = new Map();
   const campaignGroups = new Map();
   const weekLabelsSeen = new Set();
+  const warnedPromoNames = new Set(); // dedupe - a bad name repeats across many rows
 
   for (const r of dataRows) {
     const goal = col("목표", r);
@@ -112,6 +120,12 @@ function aggregateTab(tabName, rows) {
     if (!date) continue;
     const weekLabel = col("주차", r);
     if (weekLabel) weekLabelsSeen.add(weekLabel);
+
+    const promoNameCheck = col("기획전명", r);
+    if (promoNameCheck && SUSPICIOUS_PROMO_RE.test(promoNameCheck) && !warnedPromoNames.has(promoNameCheck)) {
+      warnedPromoNames.add(promoNameCheck);
+      console.warn(`[경고] ${tabName} 탭: 기획전명(AG)이 의심스러운 패턴입니다 - ${JSON.stringify(promoNameCheck)} (브랜드/기획전명(AE): ${JSON.stringify(col("브랜드/기획전명", r))})`);
+    }
 
     const spend = num(col("지출 금액 (Gross)", r));
     const gmv = num(col("GMV", r));

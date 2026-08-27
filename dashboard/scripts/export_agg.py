@@ -45,6 +45,14 @@ service = build("sheets", "v4", credentials=creds)
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ALT_DATE_RE = re.compile(r"^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$")
 
+# 정상적인 기획전명(AG)은 "YYMM 4자리 + 설명" 형태(예: "2601상시")이거나 숫자로
+# 시작하지 않는다. 5자리 이상 연속 숫자로 시작하면 날짜 코드에 다른 값이 구분자
+# 없이 그대로 붙어버린 것으로 의심된다 (실사례: "브랜드/기획전명"(AE)의
+# "260824_라네즈_260881주년"처럼 AE에도 그대로 들어있던 "260881주년" - 시트 입력
+# 오류이지 이 스크립트가 만든 값이 아니다). 데이터는 그대로 내보내고 콘솔에
+# 경고만 남긴다 - 값을 고치거나 걸러내지 않는다.
+SUSPICIOUS_PROMO_RE = re.compile(r"^\d{5,}")
+
 
 def num(s):
     if not s:
@@ -95,6 +103,7 @@ def export_tab(tab_name):
     campaign_groups = {}
     week_labels_seen = set()
     skipped_bad_date = 0
+    warned_promo_names = set()  # dedupe - a bad name repeats across many rows
 
     for r in rows:
         goal = col("목표", r)
@@ -107,6 +116,11 @@ def export_tab(tab_name):
         week_label = col("주차", r)
         if week_label:
             week_labels_seen.add(week_label)
+
+        promo_name = col("기획전명", r)
+        if promo_name and SUSPICIOUS_PROMO_RE.match(promo_name) and promo_name not in warned_promo_names:
+            warned_promo_names.add(promo_name)
+            print(f"  [경고] {tab_name} 탭: 기획전명(AG)이 의심스러운 패턴입니다 - {promo_name!r} (브랜드/기획전명(AE): {col('브랜드/기획전명', r)!r})")
 
         # Column mapping confirmed against the source sheet:
         #   impr=G click=H views=K spend=AK(Gross) purchaseConv=AI gmv=AJ

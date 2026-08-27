@@ -599,7 +599,7 @@
   // metric labels, grouped 성과/설치/첫구매/회원가입/트래픽 - column order in both
   // this header and mediaDetailRowCells above must match.
   const MEDIA_DETAIL_HEAD = `<tr>
-    <th rowspan="2">매체</th><th rowspan="2">Product/최적화</th>
+    <th rowspan="2">매체</th><th class="opt-col" rowspan="2">Product/최적화</th>
     <th colspan="3">성과</th>
     <th colspan="2">설치</th>
     <th colspan="2">첫구매</th>
@@ -627,7 +627,7 @@
     const bodyRows = mediaGroups.map(({ media, rows }, gi) => rows.map((r, i) => `
       <tr${i === 0 && gi > 0 ? ` class="media-group-start"` : ""}>
         ${i === 0 ? `<td rowspan="${rows.length}">${esc(media)}</td>` : ""}
-        <td>${esc(r.optimization)}</td>
+        <td class="opt-col">${esc(r.optimization)}</td>
         ${mediaDetailRowCells(media, r.a, r.b)}
       </tr>`).join("")).join("");
     const totalRow = `<tr class="detail-total-row"><td colspan="2">TOTAL</td>${mediaDetailRowCells(null, totalA, totalB)}</tr>`;
@@ -1514,9 +1514,10 @@
     document.getElementById("monthlyLabelB").textContent = monthlyState.labelB;
     monthlyIdleState.style.display = "none";
     monthlyReportState.style.display = "block";
-    monthlySectionsEl.innerHTML = buildMonthlyMediaSection(monthlyState) + buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
+    monthlySectionsEl.innerHTML = buildMonthlyMediaSection(monthlyState) + buildMonthlyTrendSection(monthlyState) + buildSettingDiffSection(monthlyState) + buildPromoAnalysisSection(monthlyState);
     const monthlyMediaGoalSelect = document.getElementById("monthlyMediaGoalSelect");
     if (monthlyMediaGoalSelect) renderMonthlyMediaPerformance(monthlyMediaGoalSelect.value);
+    renderMonthlyTrendChart("B");
     resetMonthlyQaPanel();
     document.getElementById("monthlyQaToggleBtn").disabled = false;
   }
@@ -1627,6 +1628,391 @@
     }
   }
 
+  // ---------- monthly TREND 전체 일별 흐름 (independent of any specific promo -
+  // whole selected month, every media/brand/promo summed together, day-level) ----------
+  const WEEKDAY_KR = ["일", "월", "화", "수", "목", "금", "토"];
+  function weekdayKr(dateStr) { return WEEKDAY_KR[new Date(dateStr + "T00:00:00Z").getUTCDay()]; }
+
+  const TREND_METRIC_SPEC = {
+    spend: { label: "광고비", fmt: fmtWon, chartType: "area" },
+    click: { label: "클릭", fmt: fmtCount, chartType: "area" },
+    roas: { label: "ROAS", fmt: (v) => (v == null ? "-" : fmtPct(v)), chartType: "line" },
+    firstPurchase: { label: "첫구매", fmt: fmtCount, chartType: "line" },
+    signup: { label: "회원가입", fmt: fmtCount, chartType: "line" },
+  };
+  const TREND_METRIC_KEYS = ["spend", "click", "roas", "firstPurchase", "signup"];
+
+  let monthlyTrendState = null; // {stateRef, month:"A"|"B", daily, anomalies, causeCache:{date:text|null|undefined}, chat, chartInstance}
+
+  // Day-level totals across EVERY media/brand/promo/goal in `rows` (monthlyState's
+  // groupsARaw/groupsBRaw), 0-filled across the whole calendar range so the chart's
+  // x-axis has no gaps even on a day with no activity (same convention buildWeeklySeries
+  // already uses for weeks). roas is null (not 0) on a day with no spend, so it reads
+  // as "no data" rather than a real 0% - matches "-" elsewhere.
+  function buildDailyTotals(rows, range) {
+    const byDate = new Map();
+    for (let d = range.start; d <= range.end; d = shiftDate(d, 1)) {
+      byDate.set(d, { date: d, spend: 0, click: 0, gmv: 0, firstPurchase: 0, signup: 0 });
+    }
+    for (const g of rows) {
+      if (!g.date || !byDate.has(g.date)) continue;
+      const o = byDate.get(g.date);
+      o.spend += g.spend || 0; o.click += g.click || 0; o.gmv += g.gmv || 0;
+      o.firstPurchase += g.firstPurchase || 0; o.signup += g.signup || 0;
+    }
+    return [...byDate.values()]
+      .map(o => ({ ...o, roas: o.spend > 0 ? roas(o.gmv, o.spend) : null }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  // A day is an anomaly if ANY of the 5 metrics deviates >=50% from the trailing
+  // (up to) 7-day average of the days immediately before it - up to the 10 largest
+  // deviations, chronological order for display. The very first day has no prior
+  // window at all and is skipped, matching "이동평균 대비" (nothing to average yet).
+  function detectMonthlyTrendAnomalies(daily) {
+    const flagged = new Map(); // date -> {date, maxDeviation, metrics:[{key,value,ma,deviation}]}
+    for (const key of TREND_METRIC_KEYS) {
+      const series = daily.map(d => d[key]);
+      for (let i = 1; i < series.length; i++) {
+        const windowVals = series.slice(Math.max(0, i - 7), i).filter(v => v != null);
+        if (!windowVals.length) continue;
+        const ma = windowVals.reduce((s, v) => s + v, 0) / windowVals.length;
+        const v = series[i];
+        if (v == null || ma === 0) continue;
+        const deviation = Math.abs(v - ma) / ma;
+        if (deviation < 0.5) continue;
+        const date = daily[i].date;
+        if (!flagged.has(date)) flagged.set(date, { date, maxDeviation: 0, metrics: [] });
+        const entry = flagged.get(date);
+        entry.metrics.push({ key, value: v, ma, deviation });
+        entry.maxDeviation = Math.max(entry.maxDeviation, deviation);
+      }
+    }
+    return [...flagged.values()]
+      .sort((a, b) => b.maxDeviation - a.maxDeviation)
+      .slice(0, 10)
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  function buildMonthlyTrendSection(state) {
+    monthlyTrendState = { stateRef: state, month: "B", daily: null, anomalies: [], causeCache: {}, chat: null, chartInstance: null };
+    return `<section class="section-card" data-ch="TREND">
+      <div class="section-title">
+        <span class="tag">TREND</span><h3>전체 일별 흐름</h3>
+        <select id="monthlyTrendMonthSelect" class="top-metric-select">
+          <option value="A">${esc(state.labelA)}</option>
+          <option value="B" selected>${esc(state.labelB)}</option>
+        </select>
+      </div>
+      <p class="chart-note">각 지표를 해당 월 최댓값 기준 0~100으로 정규화해 모양을 비교합니다.</p>
+      <p id="monthlyTrendAnomalyStatus" class="ai-loading" style="display:none;"></p>
+      <div class="chart-canvas-wrap chart-canvas-wrap-trend"><canvas id="monthlyTrendChart"></canvas></div>
+      <div class="diff-actions">
+        <button type="button" class="run-btn" id="monthlyTrendCommentBtn">이달 일별 흐름 코멘트 생성</button>
+      </div>
+      <div id="monthlyTrendCommentBody"></div>
+    </section>`;
+  }
+
+  // hex + 2-digit alpha suffix - "26" ~= 0.15 alpha (round(0.15*255)=38=0x26), the
+  // existing "33" suffix elsewhere in this file is ~0.2 alpha (unrelated, kept as-is).
+  const TREND_DIM_ALPHA_HEX = "26";
+
+  function renderMonthlyTrendChartInstance() {
+    const st = monthlyTrendState;
+    const canvas = document.getElementById("monthlyTrendChart");
+    if (!canvas || !st) return;
+    if (st.chartInstance) { st.chartInstance.destroy(); st.chartInstance = null; }
+    if (typeof Chart === "undefined") return;
+
+    const ink = cssVar("--ink-soft") || "#6C6960";
+    const border = cssVar("--border") || "#DDDAD2";
+    Chart.defaults.color = ink;
+    Chart.defaults.font.family = cssVar("--font-kr") || undefined;
+
+    const daily = st.daily;
+    const anomalyDates = new Set(st.anomalies.map(a => a.date));
+    // Precomputed normal/dim color pairs per dataset, indexed the same as datasets -
+    // the legend click handler below just swaps between these, never recomputes.
+    const datasetColors = TREND_METRIC_KEYS.map((key, i) => {
+      const color = CHART_PALETTE[i % CHART_PALETTE.length];
+      return {
+        normalBorder: color, normalBackground: color + "33",
+        dimBorder: color + TREND_DIM_ALPHA_HEX, dimBackground: color + TREND_DIM_ALPHA_HEX,
+      };
+    });
+    const datasets = TREND_METRIC_KEYS.map((key, i) => {
+      const spec = TREND_METRIC_SPEC[key];
+      const rawVals = daily.map(d => d[key]);
+      const max = Math.max(0, ...rawVals.filter(v => v != null));
+      const norm = rawVals.map(v => (v == null ? null : (max > 0 ? (v / max) * 100 : 0)));
+      const colors = datasetColors[i];
+      return {
+        type: "line", label: spec.label, data: norm,
+        borderColor: colors.normalBorder, backgroundColor: colors.normalBackground, fill: spec.chartType === "area",
+        spanGaps: true, tension: 0.2,
+        pointRadius: (ctx) => (daily[ctx.dataIndex] && anomalyDates.has(daily[ctx.dataIndex].date) ? 6 : 2),
+        pointBackgroundColor: colors.normalBorder,
+      };
+    });
+
+    st.chartInstance = new Chart(canvas.getContext("2d"), {
+      data: { labels: daily.map(d => fmtDate(d.date)), datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: {
+            labels: { color: ink },
+            // Clicking a legend entry never hides a dataset (Chart.js's default
+            // onClick toggles visibility via setDatasetVisibility - providing our
+            // own onClick here replaces that default entirely, so it's never
+            // called) - instead it dims every OTHER dataset's line/fill/point
+            // color to the precomputed ~0.15-alpha variant, leaving the clicked
+            // one at full color. Clicking the already-emphasized entry again (or
+            // clicking a different one) clears/moves the emphasis. Tracked on the
+            // chart instance itself so it always starts fresh on a new render.
+            onClick: (evt, legendItem, legend) => {
+              const chart = legend.chart;
+              const idx = legendItem.datasetIndex;
+              const next = chart.$trendEmphasized === idx ? null : idx;
+              chart.$trendEmphasized = next;
+              chart.data.datasets.forEach((ds, i) => {
+                const colors = datasetColors[i];
+                const dim = next != null && i !== next;
+                ds.borderColor = dim ? colors.dimBorder : colors.normalBorder;
+                ds.backgroundColor = dim ? colors.dimBackground : colors.normalBackground;
+                ds.pointBackgroundColor = dim ? colors.dimBorder : colors.normalBorder;
+              });
+              chart.update();
+            },
+          },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const key = TREND_METRIC_KEYS[ctx.datasetIndex];
+                const spec = TREND_METRIC_SPEC[key];
+                const real = daily[ctx.dataIndex][key];
+                return `${spec.label}: ${real == null ? "-" : spec.fmt(real)}`;
+              },
+              afterBody: (items) => {
+                if (!items.length) return [];
+                const date = daily[items[0].dataIndex].date;
+                if (!anomalyDates.has(date)) return [];
+                const cached = st.causeCache[date];
+                if (cached === undefined) return ["추정 원인 (AI): 원인 추정 준비 중"];
+                if (cached === null) return ["추정 원인 (AI): 원인 추정 실패"];
+                return [`추정 원인 (AI): ${cached}`];
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: ink, maxRotation: 60, minRotation: 30 }, grid: { display: false } },
+          y: { min: 0, max: 100, ticks: { color: ink }, grid: { color: border } },
+        },
+      },
+    });
+  }
+
+  // Per (media,campaign,group) key, the first date within the month its recorded
+  // spend goes from 0 to >0 (every earlier row for that key, if any, had spend=0 -
+  // "그 달 1일부터 해당 날짜 전날까지 지출이 0이었다가 그날 처음 지출이 잡힌 것").
+  // A key can only ever appear under ONE date's list.
+  function computeNewSpendByDate(campaignGroupsRaw) {
+    const byKey = new Map();
+    for (const g of campaignGroupsRaw) {
+      if (!g.date) continue;
+      const key = `${g.media}||${g.campaign}||${g.group}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(g);
+    }
+    const newSpendByDate = new Map();
+    for (const rows of byKey.values()) {
+      rows.sort((a, b) => a.date.localeCompare(b.date));
+      const first = rows.find(g => (g.spend || 0) > 0);
+      if (!first) continue;
+      if (!newSpendByDate.has(first.date)) newSpendByDate.set(first.date, []);
+      newSpendByDate.get(first.date).push({ media: first.media, campaign: first.campaign, group: first.group });
+    }
+    return newSpendByDate;
+  }
+
+  function fmtTrendSurgePct(pct) {
+    return Number.isFinite(pct) ? `${pct >= 0 ? "+" : ""}${Math.round(pct)}%` : "신규";
+  }
+
+  // Top 2-3 media (by |deviation|) whose day-level spend, summed across
+  // campaignGroupsRaw, deviates most from that media's own trailing (up to) 7-day
+  // average spend - same trailing-window convention detectMonthlyTrendAnomalies
+  // already uses, just per-media instead of per-overall-metric.
+  function computeMediaSpendSurges(campaignGroupsRaw, dates) {
+    const spendByDateMedia = new Map();
+    for (const g of campaignGroupsRaw) {
+      if (!g.date || !g.media) continue;
+      if (!spendByDateMedia.has(g.date)) spendByDateMedia.set(g.date, new Map());
+      const m = spendByDateMedia.get(g.date);
+      m.set(g.media, (m.get(g.media) || 0) + (g.spend || 0));
+    }
+    const sortedDates = [...spendByDateMedia.keys()].sort();
+    const surgesByDate = new Map();
+    for (const date of dates) {
+      const idx = sortedDates.indexOf(date);
+      if (idx < 0) continue;
+      const windowDates = sortedDates.slice(Math.max(0, idx - 7), idx);
+      const todayMedia = spendByDateMedia.get(date) || new Map();
+      const allMedia = new Set([...todayMedia.keys(), ...windowDates.flatMap(d => [...(spendByDateMedia.get(d) || new Map()).keys()])]);
+      const rows = [];
+      for (const media of allMedia) {
+        const todaySpend = todayMedia.get(media) || 0;
+        const windowVals = windowDates.map(d => (spendByDateMedia.get(d) || new Map()).get(media) || 0);
+        const ma = windowVals.length ? windowVals.reduce((s, v) => s + v, 0) / windowVals.length : 0;
+        if (ma === 0 && todaySpend === 0) continue;
+        const pct = ma > 0 ? ((todaySpend - ma) / ma) * 100 : Infinity;
+        rows.push({ media, pct });
+      }
+      rows.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+      surgesByDate.set(date, rows.slice(0, 3));
+    }
+    return surgesByDate;
+  }
+
+  // 매체/캠페인 신규집행·급등 컨텍스트만 배치로 모아 원인 추정을 요청한다 - 이 달의
+  // day-level campaignGroups만 쓰고, 기획전(promoGroups) 정보는 의도적으로 넘기지
+  // 않는다(서버 프롬프트도 그 두 가지 신호 밖은 추측하지 말라고 명시함).
+  async function fetchMonthlyTrendCauses() {
+    const st = monthlyTrendState;
+    const statusEl = document.getElementById("monthlyTrendAnomalyStatus");
+    if (!st.anomalies.length) { if (statusEl) statusEl.style.display = "none"; return; }
+    if (statusEl) { statusEl.textContent = "이상치 원인 추정 중..."; statusEl.style.display = "block"; }
+
+    const tabKey = st.month === "A" ? st.stateRef.tabA : st.stateRef.tabB;
+    const tabData = DATA.tabs[tabKey] || {};
+    const campaignGroupsRaw = tabData.campaignGroups || [];
+
+    const newSpendByDate = computeNewSpendByDate(campaignGroupsRaw);
+    const surgesByDate = computeMediaSpendSurges(campaignGroupsRaw, st.anomalies.map(a => a.date));
+
+    const items = st.anomalies.map(a => {
+      const idx = st.daily.findIndex(d => d.date === a.date);
+      const start = Math.max(0, idx - 2), end = Math.min(st.daily.length - 1, idx + 2);
+      const contextDays = st.daily.slice(start, end + 1).map(d => ({
+        date: fmtDate(d.date), spend: fmtWon(d.spend), click: fmtCount(d.click),
+        roas: d.roas != null ? fmtPct(d.roas) : "-", firstPurchase: fmtCount(d.firstPurchase), signup: fmtCount(d.signup),
+      }));
+      return {
+        date: a.date, weekday: weekdayKr(a.date),
+        deviations: a.metrics.map(m => ({
+          metric: TREND_METRIC_SPEC[m.key].label, value: TREND_METRIC_SPEC[m.key].fmt(m.value),
+          movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
+        })),
+        contextDays,
+        newSpendCampaigns: (newSpendByDate.get(a.date) || []).slice(0, 5).map(x => `${x.media}·${x.campaign}·${x.group}`),
+        mediaSpendSurges: (surgesByDate.get(a.date) || []).map(s => `${s.media}: 7일평균대비 ${fmtTrendSurgePct(s.pct)}`),
+      };
+    });
+
+    try {
+      const res = await fetch("/api/monthly-trend-explain", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ monthLabel: st.month === "A" ? st.stateRef.labelA : st.stateRef.labelB, items }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      for (const exp of body.explanations || []) st.causeCache[exp.date] = exp.text;
+      for (const a of st.anomalies) { if (!(a.date in st.causeCache)) st.causeCache[a.date] = null; }
+    } catch (err) {
+      for (const a of st.anomalies) st.causeCache[a.date] = null;
+    } finally {
+      if (statusEl) statusEl.style.display = "none";
+    }
+  }
+
+  // 목표(월A/월B)를 바꾸면 표뿐 아니라 이전 목표 기준 코멘트/후속 대화도 무의미해지니
+  // 매체 성과 섹션과 같은 원칙으로 항상 초기화한다.
+  function renderMonthlyTrendChart(month) {
+    const st = monthlyTrendState;
+    if (!st) return;
+    st.month = month;
+    const rows = month === "A" ? st.stateRef.groupsARaw : st.stateRef.groupsBRaw;
+    const range = month === "A" ? st.stateRef.rangeA : st.stateRef.rangeB;
+    st.daily = buildDailyTotals(rows, range);
+    st.anomalies = detectMonthlyTrendAnomalies(st.daily);
+    st.causeCache = {};
+    st.chat = null;
+    const commentBody = document.getElementById("monthlyTrendCommentBody");
+    if (commentBody) commentBody.innerHTML = "";
+    renderMonthlyTrendChartInstance();
+    fetchMonthlyTrendCauses();
+  }
+
+  function buildMonthlyTrendCommentPayload() {
+    const st = monthlyTrendState;
+    const daily = st.daily.map(d => ({
+      date: fmtDate(d.date), spend: Math.round(d.spend), click: Math.round(d.click),
+      roas: d.roas != null ? Math.round(d.roas) : null, firstPurchase: Math.round(d.firstPurchase), signup: Math.round(d.signup),
+    }));
+    const anomalies = st.anomalies.map(a => ({
+      date: fmtDate(a.date),
+      deviations: a.metrics.map(m => ({
+        metric: TREND_METRIC_SPEC[m.key].label, value: TREND_METRIC_SPEC[m.key].fmt(m.value),
+        movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
+      })),
+      cause: st.causeCache[a.date] || "원인 추정 실패 또는 아직 준비되지 않음",
+    }));
+    const monthLabel = st.month === "A" ? st.stateRef.labelA : st.stateRef.labelB;
+    return { monthLabel, daily, anomalies };
+  }
+
+  async function generateMonthlyTrendComment() {
+    const st = monthlyTrendState;
+    if (!st || !st.daily) return;
+    const btn = document.getElementById("monthlyTrendCommentBtn");
+    const bodyEl = document.getElementById("monthlyTrendCommentBody");
+    btn.disabled = true;
+    bodyEl.innerHTML = commentLoadingHtml();
+    const payload = buildMonthlyTrendCommentPayload();
+    try {
+      const res = await fetch("/api/monthly-trend-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      st.chat = { payload, history: [{ role: "model", content: leadsToPlainText(body.leads) }] };
+      bodyEl.innerHTML = `
+        ${renderMonthlyLeadsHtml(body.leads)}
+        ${inlineFollowupHtml("monthlyTrendFollowup", "예: 이 달 ROAS가 가장 튄 날은?")}`;
+    } catch (err) {
+      bodyEl.innerHTML = `<p class="ai-error">AI 코멘트를 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function submitMonthlyTrendFollowup(question) {
+    const st = monthlyTrendState;
+    if (!st || !st.chat) return;
+    const historyEl = document.getElementById("monthlyTrendFollowupHistory");
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble user">${esc(question)}</div>`);
+    st.chat.history.push({ role: "user", content: question });
+    const loadingId = "mtf-loading-" + Math.random().toString(36).slice(2);
+    historyEl.insertAdjacentHTML("beforeend", `<div class="qa-bubble model qa-loading-bubble" id="${loadingId}">답변 생성 중...</div>`);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    try {
+      const res = await fetch("/api/monthly-trend-comment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...st.chat.payload, question, history: st.chat.history.slice(0, -1) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model">${renderMonthlyLeadsHtml(body.leads)}</div>`;
+      st.chat.history.push({ role: "model", content: leadsToPlainText(body.leads) });
+    } catch (err) {
+      document.getElementById(loadingId).outerHTML = `<div class="qa-bubble model qa-error-bubble">답변을 가져오지 못했습니다. (${esc(String((err && err.message) || err))})</div>`;
+    }
+  }
+
   // ---------- section 3: 이달 캠페인 세팅 변화 (campaign/group setting diff) ----------
   let settingDiffState = null; // {newCards, endedCards} - card index -> card, read back when gathering checked selections
   let settingDiffChat = null; // {items, history:[{role,content}]} for the follow-up mini chat, null until a comment is generated
@@ -1716,22 +2102,63 @@
     ];
   }
 
-  function settingDiffCardHtml(card, kind, idx) {
+  // Groups beyond this stay in the DOM (display:none, so checked state survives)
+  // until "그룹 N개 더 보기" is clicked - see toggleDiffMoreGroups.
+  const DIFF_VISIBLE_GROUPS = 4;
+
+  // Card markup: a master "캠페인 전체" checkbox (data-kind/data-card-idx only) over
+  // a per-group checkbox list (adds data-group-idx) - selection now happens at the
+  // group level, with the master reflecting/driving the group set (see the
+  // diff-master-checkbox/diff-group-checkbox change handlers below).
+  function settingDiffCardHtml(card, kind, cardIdx) {
     const goal = (card.groups[0] || {}).goal || "";
     const agg = settingDiffCardAgg(card);
     const kpiText = settingDiffKpiSet(goal, agg).map(k => `${k.label} ${k.value}`).join(" · ");
     const campaignTag = kind === "new"
       ? (card.isNewCampaign ? `<span class="status-chip">신규 캠페인</span>` : "")
       : (card.isEndedCampaign ? `<span class="status-chip">캠페인 종료</span>` : "");
-    const groupChips = card.groups.map(g => `<code>${esc(g.group)}</code>`).join(" ");
-    return `<label class="diff-card">
-      <input type="checkbox" class="diff-checkbox" data-kind="${kind}" data-idx="${idx}">
-      <div class="diff-card-body">
+
+    const groupRows = card.groups.map((g, groupIdx) => {
+      const extra = groupIdx >= DIFF_VISIBLE_GROUPS;
+      return `<label class="diff-group-row${extra ? " diff-group-extra" : ""}"${extra ? ' style="display:none;"' : ""}>
+        <input type="checkbox" class="diff-group-checkbox" data-kind="${kind}" data-card-idx="${cardIdx}" data-group-idx="${groupIdx}">
+        <code>${esc(g.group)}</code>
+        <span class="diff-group-spend">지출 ${fmtWon(g.spend || 0)}</span>
+      </label>`;
+    }).join("");
+    const extraCount = card.groups.length - DIFF_VISIBLE_GROUPS;
+    const moreBtn = extraCount > 0
+      ? `<button type="button" class="diff-more-btn" data-kind="${kind}" data-card-idx="${cardIdx}" data-expanded="0">그룹 ${extraCount}개 더 보기</button>`
+      : "";
+
+    return `<div class="diff-card">
+      <label class="diff-card-master">
+        <input type="checkbox" class="diff-master-checkbox" data-kind="${kind}" data-card-idx="${cardIdx}">
         <div class="diff-card-head"><b>${esc(card.media)} · ${esc(card.campaign)}</b>${campaignTag}</div>
-        <div class="diff-card-groups">${groupChips}</div>
-        <div class="diff-card-perf">지출 ${fmtWon(agg.spend)} · ${kpiText}</div>
-      </div>
-    </label>`;
+      </label>
+      <div class="diff-card-groups-list">${groupRows}</div>
+      ${moreBtn}
+      <div class="diff-card-perf">지출 ${fmtWon(agg.spend)} · ${kpiText}</div>
+    </div>`;
+  }
+
+  // Buckets cards by media (label above each bucket, e.g. "Facebook · 2건") in
+  // media first-appearance order, keeping each card's TRUE index into
+  // settingDiffState.newCards/endedCards (cardIdx) rather than a per-bucket-local
+  // one, since checkbox handlers and gatherSelectedDiffItems look cards up by that
+  // index - only the grouping/display order changes, not the underlying array.
+  function buildSettingDiffCardsHtml(cards, kind) {
+    if (!cards.length) return `<p class="empty-note">${kind === "new" ? "신규 추가된" : "종료된"} 캠페인/그룹이 없습니다.</p>`;
+    const byMedia = new Map();
+    cards.forEach((card, cardIdx) => {
+      if (!byMedia.has(card.media)) byMedia.set(card.media, []);
+      byMedia.get(card.media).push({ card, cardIdx });
+    });
+    return [...byMedia.entries()].map(([media, entries]) => `
+      <div class="diff-media-group">
+        <p class="diff-media-label">${esc(media)} · ${entries.length}건</p>
+        <div class="diff-card-list">${entries.map(({ card, cardIdx }) => settingDiffCardHtml(card, kind, cardIdx)).join("")}</div>
+      </div>`).join("");
   }
 
   function buildSettingDiffSection(state) {
@@ -1739,19 +2166,18 @@
     settingDiffState = { newCards, endedCards };
     settingDiffChat = null;
 
-    const newHtml = newCards.length
-      ? newCards.map((c, i) => settingDiffCardHtml(c, "new", i)).join("")
-      : `<p class="empty-note">신규 추가된 캠페인/그룹이 없습니다.</p>`;
-    const endedHtml = endedCards.length
-      ? endedCards.map((c, i) => settingDiffCardHtml(c, "ended", i)).join("")
-      : `<p class="empty-note">종료된 캠페인/그룹이 없습니다.</p>`;
+    const selectAllHtml = (kind, count) => count > 5
+      ? `<label class="diff-select-all"><input type="checkbox" class="diff-select-all-checkbox" data-kind="${kind}"> 전체 선택</label>` : "";
 
     return `<section class="section-card" data-ch="SETTING_DIFF">
       <div class="section-title"><span class="tag">SETTING</span><h3>이달 캠페인 세팅 변화</h3></div>
-      <p class="subhead">신규 추가</p>
-      <div class="diff-card-list">${newHtml}</div>
-      <p class="subhead">그룹 종료</p>
-      <div class="diff-card-list">${endedHtml}</div>
+      <p class="subhead">신규 추가<span class="status-chip">${newCards.length}</span></p>
+      ${selectAllHtml("new", newCards.length)}
+      ${buildSettingDiffCardsHtml(newCards, "new")}
+      <p class="subhead">그룹 종료<span class="status-chip">${endedCards.length}</span></p>
+      ${selectAllHtml("ended", endedCards.length)}
+      ${buildSettingDiffCardsHtml(endedCards, "ended")}
+      <p id="settingDiffSelectedCount" class="diff-selected-count">그룹 0개 선택됨</p>
       <div class="diff-actions">
         <button type="button" class="run-btn" id="settingDiffCommentBtn" disabled>선택한 변화 코멘트 생성</button>
       </div>
@@ -1759,25 +2185,89 @@
     </section>`;
   }
 
+  // Total checked groups across both kinds -> updates the "그룹 N개 선택됨" line,
+  // the comment button's disabled state, and each kind's "전체 선택"
+  // checked/indeterminate state - called after any master/group/select-all change.
+  function updateSettingDiffSelectionUI() {
+    const checkedGroups = document.querySelectorAll(".diff-group-checkbox:checked").length;
+    const countEl = document.getElementById("settingDiffSelectedCount");
+    if (countEl) countEl.textContent = `그룹 ${checkedGroups}개 선택됨`;
+    const btn = document.getElementById("settingDiffCommentBtn");
+    if (btn) btn.disabled = checkedGroups === 0;
+    for (const kind of ["new", "ended"]) {
+      const selectAll = document.querySelector(`.diff-select-all-checkbox[data-kind="${kind}"]`);
+      if (!selectAll) continue;
+      const groupCbs = [...document.querySelectorAll(`.diff-group-checkbox[data-kind="${kind}"]`)];
+      const checked = groupCbs.filter(cb => cb.checked).length;
+      selectAll.checked = groupCbs.length > 0 && checked === groupCbs.length;
+      selectAll.indeterminate = checked > 0 && checked < groupCbs.length;
+    }
+  }
+
+  // Card's own master checkbox -> drives every group checkbox in that card to match.
+  function applyDiffMasterToGroups(masterCb) {
+    const { kind, cardIdx } = masterCb.dataset;
+    document.querySelectorAll(`.diff-group-checkbox[data-kind="${kind}"][data-card-idx="${cardIdx}"]`)
+      .forEach(cb => { cb.checked = masterCb.checked; });
+  }
+
+  // A group checkbox changed -> re-derive that card's master: all checked ->
+  // checked, none -> unchecked, some -> indeterminate.
+  function syncDiffMasterFromGroups(kind, cardIdx) {
+    const groupCbs = [...document.querySelectorAll(`.diff-group-checkbox[data-kind="${kind}"][data-card-idx="${cardIdx}"]`)];
+    const checked = groupCbs.filter(cb => cb.checked).length;
+    const master = document.querySelector(`.diff-master-checkbox[data-kind="${kind}"][data-card-idx="${cardIdx}"]`);
+    if (!master) return;
+    master.checked = groupCbs.length > 0 && checked === groupCbs.length;
+    master.indeterminate = checked > 0 && checked < groupCbs.length;
+  }
+
+  // "그룹 N개 더 보기" - pure display:none toggle on the already-rendered extra
+  // rows, never re-renders, so a checked state on a hidden group survives.
+  function toggleDiffMoreGroups(btn) {
+    const card = btn.closest(".diff-card");
+    if (!card) return;
+    const rows = card.querySelectorAll(".diff-group-row.diff-group-extra");
+    const expand = btn.dataset.expanded !== "1";
+    rows.forEach(r => { r.style.display = expand ? "" : "none"; });
+    btn.dataset.expanded = expand ? "1" : "0";
+    btn.textContent = expand ? "접기" : `그룹 ${rows.length}개 더 보기`;
+  }
+
   // items carry BOTH a `raw` numeric aggregate (chart-building, client-only) and
   // pre-formatted `spend`/`kpis` strings (sent to the AI) - stripped of `raw` right
   // before the POST body is built, so the model only ever sees ready-to-cite values.
+  // One item per card that has at least one CHECKED group (not one per group) -
+  // spend/kpis/groupNames are summed from only the checked groups. isNewCampaign/
+  // isEndedCampaign only survive a full-card selection; a partial group selection
+  // isn't "the whole campaign is new/ended", so those flags drop to false.
   function gatherSelectedDiffItems() {
     if (!settingDiffState) return [];
-    return [...document.querySelectorAll(".diff-checkbox:checked")].map(cb => {
-      const kind = cb.dataset.kind;
-      const card = (kind === "new" ? settingDiffState.newCards : settingDiffState.endedCards)[Number(cb.dataset.idx)];
-      const goal = (card.groups[0] || {}).goal || "";
-      const raw = settingDiffCardAgg(card);
-      const kpis = {};
-      for (const k of settingDiffKpiSet(goal, raw)) kpis[k.label] = k.value;
-      return {
-        kind, media: card.media, campaign: card.campaign, goal,
-        isNewCampaign: !!card.isNewCampaign, isEndedCampaign: !!card.isEndedCampaign,
-        groupNames: card.groups.map(g => g.group),
-        spend: fmtWon(raw.spend), kpis, raw,
-      };
-    });
+    const items = [];
+    for (const kind of ["new", "ended"]) {
+      const cards = kind === "new" ? settingDiffState.newCards : settingDiffState.endedCards;
+      cards.forEach((card, cardIdx) => {
+        const checkedGroupIdxs = new Set(
+          [...document.querySelectorAll(`.diff-group-checkbox[data-kind="${kind}"][data-card-idx="${cardIdx}"]:checked`)]
+            .map(cb => Number(cb.dataset.groupIdx))
+        );
+        if (!checkedGroupIdxs.size) return;
+        const selectedGroups = card.groups.filter((g, gi) => checkedGroupIdxs.has(gi));
+        const goal = (selectedGroups[0] || {}).goal || "";
+        const raw = settingDiffCardAgg({ groups: selectedGroups });
+        const kpis = {};
+        for (const k of settingDiffKpiSet(goal, raw)) kpis[k.label] = k.value;
+        const fullySelected = selectedGroups.length === card.groups.length;
+        items.push({
+          kind, media: card.media, campaign: card.campaign, goal,
+          isNewCampaign: fullySelected && !!card.isNewCampaign,
+          isEndedCampaign: fullySelected && !!card.isEndedCampaign,
+          groupNames: selectedGroups.map(g => g.group),
+          spend: fmtWon(raw.spend), kpis, raw,
+        });
+      });
+    }
+    return items;
   }
 
   async function generateSettingDiffComment() {
@@ -2845,9 +3335,17 @@
   // 이달 캠페인 세팅 변화 (section 3) - re-created on every 월간 분석 run, so wired
   // once via delegation on the shared monthlySections container, same pattern as sectionsEl above.
   monthlySectionsEl.addEventListener("change", (e) => {
-    if (e.target.classList.contains("diff-checkbox")) {
-      const btn = document.getElementById("settingDiffCommentBtn");
-      if (btn) btn.disabled = !document.querySelector(".diff-checkbox:checked");
+    if (e.target.classList.contains("diff-master-checkbox")) {
+      applyDiffMasterToGroups(e.target);
+      updateSettingDiffSelectionUI();
+    } else if (e.target.classList.contains("diff-group-checkbox")) {
+      syncDiffMasterFromGroups(e.target.dataset.kind, e.target.dataset.cardIdx);
+      updateSettingDiffSelectionUI();
+    } else if (e.target.classList.contains("diff-select-all-checkbox")) {
+      const kind = e.target.dataset.kind;
+      document.querySelectorAll(`.diff-group-checkbox[data-kind="${kind}"]`).forEach(cb => { cb.checked = e.target.checked; });
+      document.querySelectorAll(`.diff-master-checkbox[data-kind="${kind}"]`).forEach(cb => { cb.checked = e.target.checked; cb.indeterminate = false; });
+      updateSettingDiffSelectionUI();
     } else if (e.target.classList.contains("promo-metric-select")) {
       const id = Number(e.target.dataset.promoId);
       const st = promoBlockState[id];
@@ -2869,6 +3367,8 @@
     } else if (e.target.id === "promoCompareMediaMetricSelect") {
       promoCompareState.mediaMetric = e.target.value;
       renderPromoCompareCharts();
+    } else if (e.target.id === "monthlyTrendMonthSelect") {
+      renderMonthlyTrendChart(e.target.value);
     }
   });
   monthlySectionsEl.addEventListener("click", (e) => {
@@ -2879,6 +3379,8 @@
 
     if (e.target.id === "settingDiffCommentBtn") {
       generateSettingDiffComment();
+    } else if (e.target.classList.contains("diff-more-btn")) {
+      toggleDiffMoreGroups(e.target);
     } else if (e.target.id === "settingDiffFollowupToggle") {
       toggleInlinePanel("settingDiffFollowupPanel");
     } else if (e.target.id === "monthlyMediaCommentBtn") {
@@ -2897,6 +3399,10 @@
       generatePromoCompareComment();
     } else if (e.target.id === "promoCompareFollowupToggle") {
       toggleInlinePanel("promoCompareFollowupPanel");
+    } else if (e.target.id === "monthlyTrendCommentBtn") {
+      generateMonthlyTrendComment();
+    } else if (e.target.id === "monthlyTrendFollowupToggle") {
+      toggleInlinePanel("monthlyTrendFollowupPanel");
     }
   });
   monthlySectionsEl.addEventListener("input", (e) => {
@@ -2924,6 +3430,11 @@
     if (e.target.id === "promoCompareFollowupForm") {
       e.preventDefault();
       submitFromInlineChat("promoCompareFollowupInput", submitPromoCompareFollowup);
+      return;
+    }
+    if (e.target.id === "monthlyTrendFollowupForm") {
+      e.preventDefault();
+      submitFromInlineChat("monthlyTrendFollowupInput", submitMonthlyTrendFollowup);
       return;
     }
     const m = e.target.id.match(/^promoFollowup(\d+)Form$/);
