@@ -1816,26 +1816,66 @@
   }
 
   // Per (media,campaign,group) key, the first date within the month its recorded
-  // spend goes from 0 to >0 (every earlier row for that key, if any, had spend=0 -
-  // "그 달 1일부터 해당 날짜 전날까지 지출이 0이었다가 그날 처음 지출이 잡힌 것").
-  // A key can only ever appear under ONE date's list.
+  // spend goes from 0 to >0 ("그 달 1일부터 해당 날짜 전날까지 지출이 0이었다가
+  // 그날 처음 지출이 잡힌 것") - then split into two shapes depending on whether
+  // that date is also the CAMPAIGN's own first-spend date (the earliest of all its
+  // groups' first-spend dates):
+  //   - campaign-level (the whole campaign is new that day, whichever/however many
+  //     of its groups happen to launch alongside it): one {type:"campaign"} entry,
+  //     deduped to a single item per campaign even if several groups all start
+  //     spending on that same launch day.
+  //   - group-level (the campaign already had spend on an earlier day - only this
+  //     particular group is new): one {type:"group"} entry per such group, not merged.
+  // fmtNewSpendItem below turns these into "매체/캠페인" vs "매체/그룹명" respectively
+  // - the campaign name is dropped for a group-level entry since the campaign
+  //   itself isn't the new/causal thing, just pre-existing context.
+  //
+  // SETTING_DIFF_EXCLUDED_RAW_MEDIA rows are dropped first (same filter
+  // computeCampaignSettingDiff uses) - Google AC/ACe's ad group IS its creative
+  // setting, so a brand-new group is created automatically nearly every week; left
+  // in, that noise would flag "Google AC/ACe 신규 그룹" as a cause candidate almost
+  // daily and bury the real signal (an actually new campaign/group someone made).
+  // computeMediaSpendSurges below intentionally does NOT apply this filter - that's
+  // a media-level spend total, where AC/ACe's real spend should still count.
   function computeNewSpendByDate(campaignGroupsRaw) {
-    const byKey = new Map();
-    for (const g of campaignGroupsRaw) {
-      if (!g.date) continue;
+    const kept = campaignGroupsRaw.filter(g => g.date && !SETTING_DIFF_EXCLUDED_RAW_MEDIA.includes(g.rawMedia));
+
+    const byGroupKey = new Map();
+    for (const g of kept) {
       const key = `${g.media}||${g.campaign}||${g.group}`;
-      if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(g);
+      if (!byGroupKey.has(key)) byGroupKey.set(key, []);
+      byGroupKey.get(key).push(g);
     }
-    const newSpendByDate = new Map();
-    for (const rows of byKey.values()) {
+    const groupFirstSpend = []; // [{date, media, campaign, group}]
+    for (const rows of byGroupKey.values()) {
       rows.sort((a, b) => a.date.localeCompare(b.date));
       const first = rows.find(g => (g.spend || 0) > 0);
-      if (!first) continue;
-      if (!newSpendByDate.has(first.date)) newSpendByDate.set(first.date, []);
-      newSpendByDate.get(first.date).push({ media: first.media, campaign: first.campaign, group: first.group });
+      if (first) groupFirstSpend.push({ date: first.date, media: first.media, campaign: first.campaign, group: first.group });
+    }
+
+    const campaignFirstSpend = new Map(); // "media||campaign" -> earliest first-spend date among its groups
+    for (const v of groupFirstSpend) {
+      const ck = `${v.media}||${v.campaign}`;
+      if (!campaignFirstSpend.has(ck) || v.date < campaignFirstSpend.get(ck)) campaignFirstSpend.set(ck, v.date);
+    }
+
+    const newSpendByDate = new Map();
+    const campaignEmitted = new Set();
+    for (const v of groupFirstSpend) {
+      const ck = `${v.media}||${v.campaign}`;
+      const isCampaignLaunchDay = campaignFirstSpend.get(ck) === v.date;
+      const entry = isCampaignLaunchDay
+        ? (campaignEmitted.has(ck) ? null : (campaignEmitted.add(ck), { type: "campaign", media: v.media, campaign: v.campaign }))
+        : { type: "group", media: v.media, group: v.group };
+      if (!entry) continue;
+      if (!newSpendByDate.has(v.date)) newSpendByDate.set(v.date, []);
+      newSpendByDate.get(v.date).push(entry);
     }
     return newSpendByDate;
+  }
+
+  function fmtNewSpendItem(x) {
+    return x.type === "campaign" ? `${x.media}/${x.campaign}` : `${x.media}/${x.group}`;
   }
 
   function fmtTrendSurgePct(pct) {
@@ -1907,7 +1947,7 @@
           movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
         })),
         contextDays,
-        newSpendCampaigns: (newSpendByDate.get(a.date) || []).slice(0, 5).map(x => `${x.media}·${x.campaign}·${x.group}`),
+        newSpendCampaigns: (newSpendByDate.get(a.date) || []).slice(0, 5).map(fmtNewSpendItem),
         mediaSpendSurges: (surgesByDate.get(a.date) || []).map(s => `${s.media}: 7일평균대비 ${fmtTrendSurgePct(s.pct)}`),
       };
     });
