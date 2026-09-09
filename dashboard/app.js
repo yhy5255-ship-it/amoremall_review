@@ -1716,18 +1716,20 @@
 
   let monthlyTrendState = null; // {stateRef, month:"A"|"B", daily, anomalies, causeCache:{date:text|null|undefined}, chat, chartInstance}
 
-  // Day-level totals across EVERY media/brand/promo/goal in `rows` (monthlyState's
-  // groupsARaw/groupsBRaw), 0-filled across the whole calendar range so the chart's
-  // x-axis has no gaps even on a day with no activity (same convention buildWeeklySeries
-  // already uses for weeks). roas is null (not 0) on a day with no spend, so it reads
-  // as "no data" rather than a real 0% - matches "-" elsewhere.
-  function buildDailyTotals(rows, range) {
+  // Day-level totals across `rows` (monthlyState's groupsARaw/groupsBRaw),
+  // 0-filled across the whole calendar range so the chart's x-axis has no gaps
+  // even on a day with no activity (same convention buildWeeklySeries already
+  // uses for weeks). roas is null (not 0) on a day with no spend, so it reads as
+  // "no data" rather than a real 0% - matches "-" elsewhere. media (optional):
+  // restricts the sum to just that one media instead of every media/brand/promo/goal.
+  function buildDailyTotals(rows, range, media) {
     const byDate = new Map();
     for (let d = range.start; d <= range.end; d = shiftDate(d, 1)) {
       byDate.set(d, { date: d, spend: 0, click: 0, gmv: 0, firstPurchase: 0, signup: 0 });
     }
     for (const g of rows) {
       if (!g.date || !byDate.has(g.date)) continue;
+      if (media && g.media !== media) continue;
       const o = byDate.get(g.date);
       o.spend += g.spend || 0; o.click += g.click || 0; o.gmv += g.gmv || 0;
       o.firstPurchase += g.firstPurchase || 0; o.signup += g.signup || 0;
@@ -1756,7 +1758,7 @@
         const date = daily[i].date;
         if (!flagged.has(date)) flagged.set(date, { date, maxDeviation: 0, metrics: [] });
         const entry = flagged.get(date);
-        entry.metrics.push({ key, value: v, ma, deviation });
+        entry.metrics.push({ key, value: v, ma, deviation, direction: v > ma ? "up" : "down" });
         entry.maxDeviation = Math.max(entry.maxDeviation, deviation);
       }
     }
@@ -1767,7 +1769,11 @@
   }
 
   function buildMonthlyTrendSection(state) {
-    monthlyTrendState = { stateRef: state, month: "B", daily: null, anomalies: [], causeCache: {}, chat: null, chartInstance: null };
+    monthlyTrendState = { stateRef: state, month: "B", media: "", daily: null, anomalies: [], causeCache: {}, chat: null, chartInstance: null };
+    // 두 달 어느 쪽에든 등장하는 매체 전부 - 어느 달을 보고 있든 드롭다운 목록이
+    // 바뀌지 않도록 A/B 양쪽을 합쳐서 한 번만 만든다.
+    const mediaList = [...new Set([...state.groupsARaw, ...state.groupsBRaw].map(g => g.media).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
+    const mediaOptions = `<option value="">전체</option>` + mediaList.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
     return `<section class="section-card" data-ch="TREND">
       <div class="section-title">
         <span class="tag">TREND</span><h3>전체 일별 흐름</h3>
@@ -1775,6 +1781,7 @@
           <option value="A">${esc(state.labelA)}</option>
           <option value="B" selected>${esc(state.labelB)}</option>
         </select>
+        <select id="monthlyTrendMediaSelect" class="top-metric-select">${mediaOptions}</select>
       </div>
       <p class="chart-note">각 지표를 해당 월 최댓값 기준 0~100으로 정규화해 모양을 비교합니다.</p>
       <p id="monthlyTrendAnomalyStatus" class="ai-loading" style="display:none;"></p>
@@ -1789,6 +1796,31 @@
   // hex + 2-digit alpha suffix - "26" ~= 0.15 alpha (round(0.15*255)=38=0x26), the
   // existing "33" suffix elsewhere in this file is ~0.2 alpha (unrelated, kept as-is).
   const TREND_DIM_ALPHA_HEX = "26";
+
+  // Chart.js's default tooltip draws directly on the canvas - a single long line
+  // just runs past the canvas's own pixel width and is invisible beyond that edge
+  // (not "clipped", literally never drawn), which is what cut off the AI 원인
+  // 추정 text now that it can cite several candidates in one sentence. Splitting
+  // it into several shorter array entries makes Chart.js render it as multiple
+  // lines instead - the tooltip box grows taller, not wider, so its
+  // built-in edge-avoidance can keep the whole box on-canvas.
+  const TREND_TOOLTIP_WRAP_WIDTH = 42;
+  function wrapTooltipText(text, width) {
+    const words = text.split(" ");
+    const lines = [];
+    let line = "";
+    for (const w of words) {
+      const candidate = line ? `${line} ${w}` : w;
+      if (candidate.length > width && line) {
+        lines.push(line);
+        line = w;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
 
   function renderMonthlyTrendChartInstance() {
     const st = monthlyTrendState;
@@ -1872,9 +1904,11 @@
                 const date = daily[items[0].dataIndex].date;
                 if (!anomalyDates.has(date)) return [];
                 const cached = st.causeCache[date];
-                if (cached === undefined) return ["추정 원인 (AI): 원인 추정 준비 중"];
-                if (cached === null) return ["추정 원인 (AI): 원인 추정 실패"];
-                return [`추정 원인 (AI): ${cached}`];
+                let text;
+                if (cached === undefined) text = "추정 원인 (AI): 원인 추정 준비 중";
+                else if (cached === null) text = "추정 원인 (AI): 원인 추정 실패";
+                else text = `추정 원인 (AI): ${cached}`;
+                return wrapTooltipText(text, TREND_TOOLTIP_WRAP_WIDTH);
               },
             },
           },
@@ -1893,22 +1927,24 @@
   // that date is also the CAMPAIGN's own first-spend date (the earliest of all its
   // groups' first-spend dates):
   //   - campaign-level (the whole campaign is new that day, whichever/however many
-  //     of its groups happen to launch alongside it): one {type:"campaign"} entry,
-  //     deduped to a single item per campaign even if several groups all start
-  //     spending on that same launch day.
+  //     of its groups happen to launch alongside it): one {type:"campaign"} entry
+  //     per campaign, its spend/click/firstPurchase/signup SUMMED across every
+  //     group that launched alongside it that day.
   //   - group-level (the campaign already had spend on an earlier day - only this
-  //     particular group is new): one {type:"group"} entry per such group, not merged.
-  // fmtNewSpendItem below turns these into "매체/캠페인" vs "매체/그룹명" respectively
-  // - the campaign name is dropped for a group-level entry since the campaign
-  //   itself isn't the new/causal thing, just pre-existing context.
+  //     particular group is new): one {type:"group"} entry per such group, not
+  //     merged, using just that group's own day's metrics.
+  // These per-candidate metrics exist so the caller can show "이 캠페인/그룹 자체의
+  // 그날 기여분" next to the day's overall increase - a candidate merely EXISTING
+  // isn't enough to cite as a cause if its own contribution is tiny (see the
+  // "겹쳤다고 섣불리 추정" problem this was built to fix).
   //
   // SETTING_DIFF_EXCLUDED_RAW_MEDIA rows are dropped first (same filter
   // computeCampaignSettingDiff uses) - Google AC/ACe's ad group IS its creative
   // setting, so a brand-new group is created automatically nearly every week; left
   // in, that noise would flag "Google AC/ACe 신규 그룹" as a cause candidate almost
   // daily and bury the real signal (an actually new campaign/group someone made).
-  // computeMediaSpendSurges below intentionally does NOT apply this filter - that's
-  // a media-level spend total, where AC/ACe's real spend should still count.
+  // computeMediaMetricSurges below intentionally does NOT apply this filter - that's
+  // a media-level total, where AC/ACe's real numbers should still count.
   function computeNewSpendByDate(campaignGroupsRaw) {
     const kept = campaignGroupsRaw.filter(g => g.date && !SETTING_DIFF_EXCLUDED_RAW_MEDIA.includes(g.rawMedia));
 
@@ -1918,11 +1954,11 @@
       if (!byGroupKey.has(key)) byGroupKey.set(key, []);
       byGroupKey.get(key).push(g);
     }
-    const groupFirstSpend = []; // [{date, media, campaign, group}]
+    const groupFirstSpend = []; // full rows (not just names) - need their own day's metrics below
     for (const rows of byGroupKey.values()) {
       rows.sort((a, b) => a.date.localeCompare(b.date));
       const first = rows.find(g => (g.spend || 0) > 0);
-      if (first) groupFirstSpend.push({ date: first.date, media: first.media, campaign: first.campaign, group: first.group });
+      if (first) groupFirstSpend.push(first);
     }
 
     const campaignFirstSpend = new Map(); // "media||campaign" -> earliest first-spend date among its groups
@@ -1931,62 +1967,227 @@
       if (!campaignFirstSpend.has(ck) || v.date < campaignFirstSpend.get(ck)) campaignFirstSpend.set(ck, v.date);
     }
 
-    const newSpendByDate = new Map();
-    const campaignEmitted = new Set();
+    // campaign-level rows bucketed by (date,media,campaign) so simultaneous
+    // same-day group launches sum into one entry; group-level rows kept separate.
+    const campaignLevelRows = new Map();
+    const groupLevelRows = [];
     for (const v of groupFirstSpend) {
       const ck = `${v.media}||${v.campaign}`;
-      const isCampaignLaunchDay = campaignFirstSpend.get(ck) === v.date;
-      const entry = isCampaignLaunchDay
-        ? (campaignEmitted.has(ck) ? null : (campaignEmitted.add(ck), { type: "campaign", media: v.media, campaign: v.campaign }))
-        : { type: "group", media: v.media, group: v.group };
-      if (!entry) continue;
-      if (!newSpendByDate.has(v.date)) newSpendByDate.set(v.date, []);
-      newSpendByDate.get(v.date).push(entry);
+      if (campaignFirstSpend.get(ck) === v.date) {
+        const key = `${v.date}||${v.media}||${v.campaign}`;
+        if (!campaignLevelRows.has(key)) campaignLevelRows.set(key, []);
+        campaignLevelRows.get(key).push(v);
+      } else {
+        groupLevelRows.push(v);
+      }
+    }
+
+    const newSpendByDate = new Map();
+    const addEntry = (date, entry) => {
+      if (!newSpendByDate.has(date)) newSpendByDate.set(date, []);
+      newSpendByDate.get(date).push(entry);
+    };
+    for (const [key, rows] of campaignLevelRows) {
+      const [date, media, campaign] = key.split("||");
+      addEntry(date, {
+        type: "campaign", media, campaign,
+        spend: sum(rows, "spend"), click: sum(rows, "click"),
+        firstPurchase: sum(rows, "firstPurchase"), signup: sum(rows, "signup"),
+      });
+    }
+    for (const v of groupLevelRows) {
+      addEntry(v.date, {
+        type: "group", media: v.media, group: v.group,
+        spend: v.spend || 0, click: v.click || 0, firstPurchase: v.firstPurchase || 0, signup: v.signup || 0,
+      });
     }
     return newSpendByDate;
   }
 
-  function fmtNewSpendItem(x) {
-    return x.type === "campaign" ? `${x.media}/${x.campaign}` : `${x.media}/${x.group}`;
+  // "매체/캠페인명 (첫구매 기여 2건/증가분 87건, ...)" - one contribution clause per
+  // metric in `increasingMetrics` (that day's deviated-and-INCREASED additive
+  // metrics only; see fetchMonthlyTrendCauses), so the model can directly compare
+  // this one candidate's own number against the day's total move instead of just
+  // being told a name exists on the right date.
+  function fmtNewSpendCandidate(entry, increasingMetrics) {
+    const nameLabel = entry.type === "campaign" ? `${entry.media}/${entry.campaign}` : `${entry.media}/${entry.group}`;
+    const parts = increasingMetrics.map(m => {
+      const spec = TREND_METRIC_SPEC[m.key];
+      return `${spec.label} 기여 ${spec.fmt(entry[m.key])}/그날 증가분 ${spec.fmt(m.value - m.ma)}`;
+    });
+    return parts.length ? `${nameLabel} (${parts.join(", ")})` : nameLabel;
   }
 
   function fmtTrendSurgePct(pct) {
     return Number.isFinite(pct) ? `${pct >= 0 ? "+" : ""}${Math.round(pct)}%` : "신규";
   }
 
-  // Top 2-3 media (by |deviation|) whose day-level spend, summed across
-  // campaignGroupsRaw, deviates most from that media's own trailing (up to) 7-day
-  // average spend - same trailing-window convention detectMonthlyTrendAnomalies
-  // already uses, just per-media instead of per-overall-metric.
-  function computeMediaSpendSurges(campaignGroupsRaw, dates) {
-    const spendByDateMedia = new Map();
+  // promoGroups 로우는 날짜 x 목표 x 브랜드 x 기획전 x 소재 단위라 소재별로 쪼개져
+  // 있음 - 그중 "그 기획전의 promoStart(기획전 시작날짜)와 date가 일치하는" 로우만
+  // (브랜드,기획전) 키로 소재별 합산해 "이 기획전이 시작된 날 자체의 기여"를 만든다.
+  // computeNewSpendByDate처럼 spend가 0->양수로 바뀌는 날을 추론하는 대신 시트에
+  // 이미 명시된 시작일을 그대로 신뢰한다(더 정확함 - 무지출 CRM성 기획전도 잡을 수 있음).
+  // promoStart가 비어있거나 "상시"인 기획전은 시작일을 특정할 수 없어 후보에서 제외.
+  function computeNewPromoByDate(promoGroupsRaw) {
+    const byKey = new Map(); // "brand||promo" -> {brand, promo, date, spend, click, firstPurchase, signup}
+    for (const p of promoGroupsRaw) {
+      if (!p.date || !p.promo || !p.promoStart || p.promoStart === "상시") continue;
+      if (p.date !== p.promoStart) continue;
+      const key = `${p.brand || ""}||${p.promo}`;
+      if (!byKey.has(key)) byKey.set(key, { brand: p.brand, promo: p.promo, date: p.promoStart, spend: 0, click: 0, firstPurchase: 0, signup: 0 });
+      const o = byKey.get(key);
+      o.spend += p.spend || 0; o.click += p.click || 0; o.firstPurchase += p.firstPurchase || 0; o.signup += p.signup || 0;
+    }
+    const newPromoByDate = new Map();
+    for (const o of byKey.values()) {
+      if (!newPromoByDate.has(o.date)) newPromoByDate.set(o.date, []);
+      newPromoByDate.get(o.date).push({ type: "promo", brand: o.brand, promo: o.promo, spend: o.spend, click: o.click, firstPurchase: o.firstPurchase, signup: o.signup });
+    }
+    return newPromoByDate;
+  }
+
+  // fmtNewSpendCandidate와 같은 포맷 - "브랜드 · 기획전명 (지표 기여 N/그날 증가분 M, ...)".
+  function fmtNewPromoCandidate(entry, increasingMetrics) {
+    const nameLabel = entry.brand ? `${entry.brand} · ${entry.promo}` : entry.promo;
+    const parts = increasingMetrics.map(m => {
+      const spec = TREND_METRIC_SPEC[m.key];
+      return `${spec.label} 기여 ${spec.fmt(entry[m.key])}/그날 증가분 ${spec.fmt(m.value - m.ma)}`;
+    });
+    return parts.length ? `${nameLabel} (${parts.join(", ")})` : nameLabel;
+  }
+
+  // computeMediaMetricSurges와 같은 아이디어를 캠페인 단위로 - 매체 전체 합산보다 훨씬
+  // 세밀하게, 이미 있던 캠페인인데 그날 자체 지표가 급등한 경우(신규 집행이 아니라
+  // 예산 증액/타겟팅 변경 등으로 튄 경우)를 짚어준다. ma===0(그 전엔 전혀 없다가 생김)
+  // 인 건 이미 newSpendCampaigns가 "신규"로 다루니 여기선 제외 - 중복/혼란 방지.
+  // increasingMetrics(그날 실제로 증가한 지표들, 각 {key,value,ma})를 받아
+  // fmtNewSpendCandidate와 같은 "기여/그날 증가분" 비교를 붙여, 신규 집행 신호와
+  // 나란히 비교 가능한 형태로 만든다.
+  function computeCampaignMetricSurges(campaignGroupsRaw, date, increasingMetrics) {
+    const byDateCampaign = new Map(); // date -> "media||campaign" -> {spend,click,firstPurchase,signup}
+    for (const g of campaignGroupsRaw) {
+      if (!g.date || !g.media || !g.campaign) continue;
+      if (!byDateCampaign.has(g.date)) byDateCampaign.set(g.date, new Map());
+      const m = byDateCampaign.get(g.date);
+      const key = `${g.media}||${g.campaign}`;
+      if (!m.has(key)) m.set(key, { spend: 0, click: 0, firstPurchase: 0, signup: 0 });
+      const o = m.get(key);
+      o.spend += g.spend || 0; o.click += g.click || 0; o.firstPurchase += g.firstPurchase || 0; o.signup += g.signup || 0;
+    }
+    const sortedDates = [...byDateCampaign.keys()].sort();
+    const idx = sortedDates.indexOf(date);
+    if (idx < 0) return [];
+    const windowDates = sortedDates.slice(Math.max(0, idx - 7), idx);
+    const todayCampaigns = byDateCampaign.get(date) || new Map();
+
+    const out = [];
+    for (const m of increasingMetrics) {
+      const metricKey = m.key;
+      const allKeys = new Set([...todayCampaigns.keys(), ...windowDates.flatMap(d => [...(byDateCampaign.get(d) || new Map()).keys()])]);
+      const rows = [];
+      for (const key of allKeys) {
+        const todayVal = (todayCampaigns.get(key) || {})[metricKey] || 0;
+        const windowVals = windowDates.map(d => ((byDateCampaign.get(d) || new Map()).get(key) || {})[metricKey] || 0);
+        const ma = windowVals.length ? windowVals.reduce((s, v) => s + v, 0) / windowVals.length : 0;
+        if (ma === 0) continue; // 신규(0->양수)는 newSpendCampaigns 담당
+        const pct = ((todayVal - ma) / ma) * 100;
+        rows.push({ key, pct, todayVal });
+      }
+      rows.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+      const spec = TREND_METRIC_SPEC[metricKey];
+      for (const r of rows.slice(0, 3)) {
+        const [media, campaign] = r.key.split("||");
+        out.push(`${media}/${campaign} ${spec.label}: 자체 7일평균대비 ${fmtTrendSurgePct(r.pct)} (기여 ${spec.fmt(r.todayVal)}/그날 증가분 ${spec.fmt(m.value - m.ma)})`);
+      }
+    }
+    return out;
+  }
+
+  // computeCampaignMetricSurges와 같은 로직을 (브랜드,기획전) 단위로 - 이미 진행
+  // 중이던 기획전이 특정 날(라이브 방송 등 이벤트 데이 - promoStart와 다를 수 있음)만
+  // 급등하는 경우를 잡는다. 소재(material)별로 쪼개진 로우를 먼저 (날짜,브랜드,기획전)
+  // 단위로 합산한 뒤 트렌드 계산.
+  function computePromoMetricSurges(promoGroupsRaw, date, increasingMetrics) {
+    const byDatePromo = new Map();
+    for (const p of promoGroupsRaw) {
+      if (!p.date || !p.promo) continue;
+      if (!byDatePromo.has(p.date)) byDatePromo.set(p.date, new Map());
+      const m = byDatePromo.get(p.date);
+      const key = `${p.brand || ""}||${p.promo}`;
+      if (!m.has(key)) m.set(key, { spend: 0, click: 0, firstPurchase: 0, signup: 0 });
+      const o = m.get(key);
+      o.spend += p.spend || 0; o.click += p.click || 0; o.firstPurchase += p.firstPurchase || 0; o.signup += p.signup || 0;
+    }
+    const sortedDates = [...byDatePromo.keys()].sort();
+    const idx = sortedDates.indexOf(date);
+    if (idx < 0) return [];
+    const windowDates = sortedDates.slice(Math.max(0, idx - 7), idx);
+    const todayPromos = byDatePromo.get(date) || new Map();
+
+    const out = [];
+    for (const m of increasingMetrics) {
+      const metricKey = m.key;
+      const allKeys = new Set([...todayPromos.keys(), ...windowDates.flatMap(d => [...(byDatePromo.get(d) || new Map()).keys()])]);
+      const rows = [];
+      for (const key of allKeys) {
+        const todayVal = (todayPromos.get(key) || {})[metricKey] || 0;
+        const windowVals = windowDates.map(d => ((byDatePromo.get(d) || new Map()).get(key) || {})[metricKey] || 0);
+        const ma = windowVals.length ? windowVals.reduce((s, v) => s + v, 0) / windowVals.length : 0;
+        if (ma === 0) continue; // 신규 시작은 newPromoCandidates 담당
+        const pct = ((todayVal - ma) / ma) * 100;
+        rows.push({ key, pct, todayVal });
+      }
+      rows.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+      const spec = TREND_METRIC_SPEC[metricKey];
+      for (const r of rows.slice(0, 3)) {
+        const [brand, promo] = r.key.split("||");
+        const nameLabel = brand ? `${brand} · ${promo}` : promo;
+        out.push(`${nameLabel} ${spec.label}: 자체 7일평균대비 ${fmtTrendSurgePct(r.pct)} (기여 ${spec.fmt(r.todayVal)}/그날 증가분 ${spec.fmt(m.value - m.ma)})`);
+      }
+    }
+    return out;
+  }
+
+  // Top 2-3 media (by |deviation|) whose day-level total for ONE metric, summed
+  // across campaignGroupsRaw, deviates most from that media's own trailing (up to)
+  // 7-day average FOR THAT SAME METRIC - same trailing-window convention
+  // detectMonthlyTrendAnomalies already uses, just per-media. Computed per metric
+  // (not always spend) so a first구매/회원가입 anomaly gets ranked by media-level
+  // first구매/회원가입 surges, not a media's unrelated overall spend swing.
+  function computeMediaMetricSurges(campaignGroupsRaw, date, metricKeys) {
+    const byDateMedia = new Map(); // date -> media -> {spend,click,firstPurchase,signup}
     for (const g of campaignGroupsRaw) {
       if (!g.date || !g.media) continue;
-      if (!spendByDateMedia.has(g.date)) spendByDateMedia.set(g.date, new Map());
-      const m = spendByDateMedia.get(g.date);
-      m.set(g.media, (m.get(g.media) || 0) + (g.spend || 0));
+      if (!byDateMedia.has(g.date)) byDateMedia.set(g.date, new Map());
+      const m = byDateMedia.get(g.date);
+      if (!m.has(g.media)) m.set(g.media, { spend: 0, click: 0, firstPurchase: 0, signup: 0 });
+      const o = m.get(g.media);
+      o.spend += g.spend || 0; o.click += g.click || 0; o.firstPurchase += g.firstPurchase || 0; o.signup += g.signup || 0;
     }
-    const sortedDates = [...spendByDateMedia.keys()].sort();
-    const surgesByDate = new Map();
-    for (const date of dates) {
-      const idx = sortedDates.indexOf(date);
-      if (idx < 0) continue;
-      const windowDates = sortedDates.slice(Math.max(0, idx - 7), idx);
-      const todayMedia = spendByDateMedia.get(date) || new Map();
-      const allMedia = new Set([...todayMedia.keys(), ...windowDates.flatMap(d => [...(spendByDateMedia.get(d) || new Map()).keys()])]);
+    const sortedDates = [...byDateMedia.keys()].sort();
+    const idx = sortedDates.indexOf(date);
+    if (idx < 0) return [];
+    const windowDates = sortedDates.slice(Math.max(0, idx - 7), idx);
+    const todayMedia = byDateMedia.get(date) || new Map();
+
+    const out = [];
+    for (const metricKey of metricKeys) {
+      const allMedia = new Set([...todayMedia.keys(), ...windowDates.flatMap(d => [...(byDateMedia.get(d) || new Map()).keys()])]);
       const rows = [];
       for (const media of allMedia) {
-        const todaySpend = todayMedia.get(media) || 0;
-        const windowVals = windowDates.map(d => (spendByDateMedia.get(d) || new Map()).get(media) || 0);
+        const todayVal = (todayMedia.get(media) || {})[metricKey] || 0;
+        const windowVals = windowDates.map(d => ((byDateMedia.get(d) || new Map()).get(media) || {})[metricKey] || 0);
         const ma = windowVals.length ? windowVals.reduce((s, v) => s + v, 0) / windowVals.length : 0;
-        if (ma === 0 && todaySpend === 0) continue;
-        const pct = ma > 0 ? ((todaySpend - ma) / ma) * 100 : Infinity;
+        if (ma === 0 && todayVal === 0) continue;
+        const pct = ma > 0 ? ((todayVal - ma) / ma) * 100 : Infinity;
         rows.push({ media, pct });
       }
       rows.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
-      surgesByDate.set(date, rows.slice(0, 3));
+      for (const r of rows.slice(0, 3)) {
+        out.push(`${r.media} ${TREND_METRIC_SPEC[metricKey].label}: 7일평균대비 ${fmtTrendSurgePct(r.pct)}`);
+      }
     }
-    return surgesByDate;
+    return out;
   }
 
   // 매체/캠페인 신규집행·급등 컨텍스트만 배치로 모아 원인 추정을 요청한다 - 이 달의
@@ -2000,14 +2201,22 @@
 
     const tabKey = st.month === "A" ? st.stateRef.tabA : st.stateRef.tabB;
     const tabData = DATA.tabs[tabKey] || {};
-    const campaignGroupsRaw = tabData.campaignGroups || [];
+    // 매체 필터가 걸려 있으면(전체 일별 흐름 자체가 그 매체로 좁혀진 상태) 원인 후보도
+    // 같은 매체로 좁힌다 - 안 그러면 화면엔 Meta만 보이는데 원인은 "Kakao 급등" 같은
+    // 엉뚱한 매체를 짚는 불일치가 생긴다.
+    const campaignGroupsRaw = (tabData.campaignGroups || []).filter(g => !st.media || g.media === st.media);
+    // promoGroups엔 매체 차원이 없다(계정 전체 합산) - 매체 필터가 걸린 상태에선 기획전
+    // 신호를 신뢰할 수 없으므로(한 매체로 좁힌 이상치를 전체-매체 합산 기획전 탓으로
+    // 돌릴 근거가 없음) 통째로 스킵한다.
+    const promoGroupsRaw = st.media ? [] : (tabData.promoGroups || []);
 
     const newSpendByDate = computeNewSpendByDate(campaignGroupsRaw);
-    const surgesByDate = computeMediaSpendSurges(campaignGroupsRaw, st.anomalies.map(a => a.date));
+    const newPromoByDate = computeNewPromoByDate(promoGroupsRaw);
     // 세팅 변경 히스토리(기존 기능에 연결) - 그 이상치 "날짜 당일" 기록만 본다(범위가
-    // 아니라 정확히 그날). 트렌드 기능은 원래 기획전 정보를 아예 배제하기로 했으므로
-    // (지난 작업 결정 유지) promoNames는 넘기지 않고 campaign/group명만 매칭한다.
+    // 아니라 정확히 그날). promoNames도 함께 매칭한다 - 담당자가 기획전 시작/변경을
+    // 기록해뒀다면 이제 이 경로에서도 잡힌다(과거엔 트렌드 기능만 promo 매칭을 배제했었음).
     const { campaignNames, groupNames } = buildHistoryNameSets(campaignGroupsRaw);
+    const promoNames = new Set(promoGroupsRaw.map(p => p.promo).filter(Boolean));
     const historyEntriesRaw = (st.stateRef && st.stateRef.historyEntriesRaw) || [];
 
     const items = st.anomalies.map(a => {
@@ -2017,16 +2226,44 @@
         date: fmtDate(d.date), spend: fmtWon(d.spend), click: fmtCount(d.click),
         roas: d.roas != null ? fmtPct(d.roas) : "-", firstPurchase: fmtCount(d.firstPurchase), signup: fmtCount(d.signup),
       }));
+
+      // 신규 집행/급등 신호 전부 "증가"만 설명할 수 있는 신호다 - 새로 생긴 캠페인·
+      // 기획전이나 기존 캠페인·기획전·매체의 지표 급증이 어떤 지표의 "감소"를 만들어낼
+      // 순 없으니, 그날 실제로 증가한 지표(ROAS 제외 - 합산 가능한 값이 아니라 "이
+      // 캠페인의 기여분" 개념이 안 맞음)에 대해서만 아래 신호들을 계산한다. 증가한
+      // 지표가 하나도 없으면(전부 감소, 또는 ROAS만 벗어남) 전부 빈 배열로 - 근거 없이
+      // 아무 캠페인/기획전이나 짚는 걸 원천 차단.
+      const increasingMetrics = a.metrics.filter(m => m.direction === "up" && m.key !== "roas");
+      const newSpendCampaigns = increasingMetrics.length
+        ? (newSpendByDate.get(a.date) || []).slice(0, 5).map(entry => fmtNewSpendCandidate(entry, increasingMetrics))
+        : [];
+      const newPromoCandidates = increasingMetrics.length
+        ? (newPromoByDate.get(a.date) || []).slice(0, 5).map(entry => fmtNewPromoCandidate(entry, increasingMetrics))
+        : [];
+      const campaignMetricSurges = increasingMetrics.length
+        ? computeCampaignMetricSurges(campaignGroupsRaw, a.date, increasingMetrics)
+        : [];
+      const promoMetricSurges = increasingMetrics.length && promoGroupsRaw.length
+        ? computePromoMetricSurges(promoGroupsRaw, a.date, increasingMetrics)
+        : [];
+      const mediaSpendSurges = increasingMetrics.length
+        ? computeMediaMetricSurges(campaignGroupsRaw, a.date, increasingMetrics.map(m => m.key))
+        : [];
+
       return {
         date: a.date, weekday: weekdayKr(a.date),
         deviations: a.metrics.map(m => ({
           metric: TREND_METRIC_SPEC[m.key].label, value: TREND_METRIC_SPEC[m.key].fmt(m.value),
-          movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
+          movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), direction: m.direction === "up" ? "증가" : "감소",
+          deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
         })),
         contextDays,
-        historyEntries: matchHistoryOnDate(historyEntriesRaw, a.date, campaignNames, groupNames).map(fmtHistoryEntryForPrompt),
-        newSpendCampaigns: (newSpendByDate.get(a.date) || []).slice(0, 5).map(fmtNewSpendItem),
-        mediaSpendSurges: (surgesByDate.get(a.date) || []).map(s => `${s.media}: 7일평균대비 ${fmtTrendSurgePct(s.pct)}`),
+        historyEntries: matchHistoryOnDate(historyEntriesRaw, a.date, campaignNames, groupNames, promoNames).map(fmtHistoryEntryForPrompt),
+        newSpendCampaigns,
+        newPromoCandidates,
+        campaignMetricSurges,
+        promoMetricSurges,
+        mediaSpendSurges,
       };
     });
 
@@ -2046,15 +2283,14 @@
     }
   }
 
-  // 목표(월A/월B)를 바꾸면 표뿐 아니라 이전 목표 기준 코멘트/후속 대화도 무의미해지니
-  // 매체 성과 섹션과 같은 원칙으로 항상 초기화한다.
-  function renderMonthlyTrendChart(month) {
+  // 월(A/B)이나 매체 필터 중 어느 쪽을 바꾸든 표뿐 아니라 이전 기준 코멘트/후속
+  // 대화도 무의미해지니 매체 성과 섹션과 같은 원칙으로 항상 초기화한다.
+  function rebuildMonthlyTrend() {
     const st = monthlyTrendState;
     if (!st) return;
-    st.month = month;
-    const rows = month === "A" ? st.stateRef.groupsARaw : st.stateRef.groupsBRaw;
-    const range = month === "A" ? st.stateRef.rangeA : st.stateRef.rangeB;
-    st.daily = buildDailyTotals(rows, range);
+    const rows = st.month === "A" ? st.stateRef.groupsARaw : st.stateRef.groupsBRaw;
+    const range = st.month === "A" ? st.stateRef.rangeA : st.stateRef.rangeB;
+    st.daily = buildDailyTotals(rows, range, st.media);
     st.anomalies = detectMonthlyTrendAnomalies(st.daily);
     st.causeCache = {};
     st.chat = null;
@@ -2062,6 +2298,14 @@
     if (commentBody) commentBody.innerHTML = "";
     renderMonthlyTrendChartInstance();
     fetchMonthlyTrendCauses();
+  }
+  function renderMonthlyTrendChart(month) {
+    if (monthlyTrendState) monthlyTrendState.month = month;
+    rebuildMonthlyTrend();
+  }
+  function renderMonthlyTrendByMedia(media) {
+    if (monthlyTrendState) monthlyTrendState.media = media;
+    rebuildMonthlyTrend();
   }
 
   function buildMonthlyTrendCommentPayload() {
@@ -2079,7 +2323,7 @@
       cause: st.causeCache[a.date] || "원인 추정 실패 또는 아직 준비되지 않음",
     }));
     const monthLabel = st.month === "A" ? st.stateRef.labelA : st.stateRef.labelB;
-    return { monthLabel, daily, anomalies };
+    return { monthLabel, media: st.media || "전체", daily, anomalies };
   }
 
   async function generateMonthlyTrendComment() {
@@ -3515,6 +3759,8 @@
       renderPromoCompareCharts();
     } else if (e.target.id === "monthlyTrendMonthSelect") {
       renderMonthlyTrendChart(e.target.value);
+    } else if (e.target.id === "monthlyTrendMediaSelect") {
+      renderMonthlyTrendByMedia(e.target.value);
     }
   });
   monthlySectionsEl.addEventListener("click", (e) => {
