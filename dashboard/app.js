@@ -244,6 +244,73 @@
     return d;
   }
 
+  // ---------- 세팅 변경 히스토리 (수동 기록 시트, api/history.js) ----------
+  // Fetched fresh on every weekly/monthly report run - small sheet, edited by hand
+  // far more often than the Friday data refresh, so no caching across runs.
+  async function fetchHistoryEntries() {
+    try {
+      const res = await fetch("/api/history", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      return body.history || [];
+    } catch (err) {
+      return []; // enrichment only - a history-fetch failure must never block the report itself
+    }
+  }
+
+  // campaign/group name sets an entry's G-column value can be checked against -
+  // built once per report run from whichever campaignGroups rows are in scope.
+  function buildHistoryNameSets(campaignGroupsRaw) {
+    const campaignNames = new Set(), groupNames = new Set();
+    for (const g of campaignGroupsRaw) {
+      if (g.campaign) campaignNames.add(String(g.campaign).trim());
+      if (g.group) groupNames.add(String(g.group).trim());
+    }
+    return { campaignNames, groupNames };
+  }
+
+  // Trimmed-exact match only (the sheet's own rule promises G/I already match RAW
+  // values character-for-character) - entry.isGroupLevel (a "[그룹] " prefix on G,
+  // already stripped by api/history.js) picks which name set G is checked against.
+  // promoNames is optional - omit it where the caller's data has no promo concept
+  // to match against (campaignGroups rows carry no promo/brand field).
+  function historyEntryMatches(entry, campaignNames, groupNames, promoNames) {
+    if (entry.campaign) {
+      const nameSet = entry.isGroupLevel ? groupNames : campaignNames;
+      if (nameSet.has(entry.campaign)) return true;
+    }
+    if (promoNames && entry.promo && promoNames.has(entry.promo)) return true;
+    return false;
+  }
+  function matchHistoryInRange(entries, start, end, campaignNames, groupNames, promoNames) {
+    return entries.filter(e => e.date >= start && e.date <= end && historyEntryMatches(e, campaignNames, groupNames, promoNames));
+  }
+  function matchHistoryOnDate(entries, date, campaignNames, groupNames, promoNames) {
+    return entries.filter(e => e.date === date && historyEntryMatches(e, campaignNames, groupNames, promoNames));
+  }
+  // Union of matchHistoryInRange across several [start,end] periods (e.g. weekly's
+  // A period + B period), deduped in case the same entry matches more than one.
+  function matchHistoryForPeriods(entries, periods, campaignNames, groupNames, promoNames) {
+    const seen = new Set(), out = [];
+    for (const [start, end] of periods) {
+      for (const e of matchHistoryInRange(entries, start, end, campaignNames, groupNames, promoNames)) {
+        const key = `${e.date}||${e.campaign}||${e.promo}||${e.detail}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(e);
+      }
+    }
+    return out;
+  }
+  // Plain, formatted shape sent to an AI comment payload - the "isGroupLevel"
+  // distinction stays internal (matching logic only); callers just see one label.
+  function fmtHistoryEntryForPrompt(e) {
+    return {
+      date: e.dateLabel || e.date, media: e.media.join("/"),
+      target: e.campaign || e.promo || "", changeType: e.changeType, detail: e.detail,
+    };
+  }
+
   // ---------- detail table ----------
   const DETAIL_HEAD = `<tr><th>기획전</th><th>상태</th><th>지출(Gross)</th><th>매출(GMV)</th><th>ROAS</th><th>첫구매</th><th>회원가입</th><th>앱설치</th></tr>`;
   function detailLabel(p) {
@@ -1487,14 +1554,19 @@
   }
 
   // Prepares the A/B month data pool that sections 3-6 render from.
-  function runMonthlyAnalysis() {
+  async function runMonthlyAnalysis() {
     const tabA = monthASelect.value, tabB = monthBSelect.value;
     if (!tabA || !tabB) { alert("비교할 두 달을 선택하세요."); return; }
     const rangeA = monthTabDateRange(tabA), rangeB = monthTabDateRange(tabB);
     const dataA = DATA.tabs[tabA] || {}, dataB = DATA.tabs[tabB] || {};
 
+    // 세팅 변경 히스토리(수동 기록 시트) - 한 번만 받아서 이달 세팅 변화 카드와 전체
+    // 일별 흐름 이상치 원인 추정 두 곳(기존 기능에 연결) 모두 이걸 재사용한다.
+    const historyEntriesRaw = await fetchHistoryEntries();
+
     monthlyState = {
       tabA, tabB, rangeA, rangeB, labelA: monthTabLabel(tabA), labelB: monthTabLabel(tabB),
+      historyEntriesRaw,
       groupsA: aggregateGroupsByDateRange(dataA.groups || [], rangeA.start, rangeA.end),
       groupsB: aggregateGroupsByDateRange(dataB.groups || [], rangeB.start, rangeB.end),
       // day-level, NOT aggregated across dates - section 4's weekly GMV/ROAS chart and
@@ -1932,6 +2004,11 @@
 
     const newSpendByDate = computeNewSpendByDate(campaignGroupsRaw);
     const surgesByDate = computeMediaSpendSurges(campaignGroupsRaw, st.anomalies.map(a => a.date));
+    // 세팅 변경 히스토리(기존 기능에 연결) - 그 이상치 "날짜 당일" 기록만 본다(범위가
+    // 아니라 정확히 그날). 트렌드 기능은 원래 기획전 정보를 아예 배제하기로 했으므로
+    // (지난 작업 결정 유지) promoNames는 넘기지 않고 campaign/group명만 매칭한다.
+    const { campaignNames, groupNames } = buildHistoryNameSets(campaignGroupsRaw);
+    const historyEntriesRaw = (st.stateRef && st.stateRef.historyEntriesRaw) || [];
 
     const items = st.anomalies.map(a => {
       const idx = st.daily.findIndex(d => d.date === a.date);
@@ -1947,6 +2024,7 @@
           movingAvg: TREND_METRIC_SPEC[m.key].fmt(m.ma), deviationPct: `${m.value >= m.ma ? "+" : "-"}${Math.round(m.deviation * 100)}%`,
         })),
         contextDays,
+        historyEntries: matchHistoryOnDate(historyEntriesRaw, a.date, campaignNames, groupNames).map(fmtHistoryEntryForPrompt),
         newSpendCampaigns: (newSpendByDate.get(a.date) || []).slice(0, 5).map(fmtNewSpendItem),
         mediaSpendSurges: (surgesByDate.get(a.date) || []).map(s => `${s.media}: 7일평균대비 ${fmtTrendSurgePct(s.pct)}`),
       };
@@ -2055,6 +2133,7 @@
 
   // ---------- section 3: 이달 캠페인 세팅 변화 (campaign/group setting diff) ----------
   let settingDiffState = null; // {newCards, endedCards} - card index -> card, read back when gathering checked selections
+  let settingDiffHistoryByCardKey = new Map(); // "new||0" etc -> matched 세팅 변경 히스토리 entries[] for that card
   let settingDiffChat = null; // {items, history:[{role,content}]} for the follow-up mini chat, null until a comment is generated
 
   function settingDiffKeyOf(g) { return `${g.media}||${g.campaign}||${g.group}`; }
@@ -2171,6 +2250,13 @@
       ? `<button type="button" class="diff-more-btn" data-kind="${kind}" data-card-idx="${cardIdx}" data-expanded="0">그룹 ${extraCount}개 더 보기</button>`
       : "";
 
+    const historyMatches = settingDiffHistoryByCardKey.get(`${kind}||${cardIdx}`) || [];
+    const historyHtml = historyMatches.length
+      ? `<div class="diff-card-history">${historyMatches.map(e =>
+          `<div class="history-note">📝 ${esc(e.dateLabel || e.date)}${e.changeType ? ` · ${esc(e.changeType)}` : ""}: ${esc(e.detail || "(상세 내용 없음)")}</div>`
+        ).join("")}</div>`
+      : "";
+
     return `<div class="diff-card">
       <label class="diff-card-master">
         <input type="checkbox" class="diff-master-checkbox" data-kind="${kind}" data-card-idx="${cardIdx}">
@@ -2179,6 +2265,7 @@
       <div class="diff-card-groups-list">${groupRows}</div>
       ${moreBtn}
       <div class="diff-card-perf">지출 ${fmtWon(agg.spend)} · ${kpiText}</div>
+      ${historyHtml}
     </div>`;
   }
 
@@ -2205,6 +2292,24 @@
     const { newCards, endedCards } = computeCampaignSettingDiff(state.campaignGroupsA, state.campaignGroupsB);
     settingDiffState = { newCards, endedCards };
     settingDiffChat = null;
+
+    // 세팅 변경 히스토리(기존 기능에 연결) - A/B 두 달 범위에 걸리는 항목 중, 각
+    // 카드의 캠페인명 또는 그 카드에 속한 그룹명과 매칭되는 것만 카드별로 붙인다.
+    // campaignGroups 로우엔 기획전 필드가 없으니 promo(I) 매칭은 하지 않는다.
+    settingDiffHistoryByCardKey = new Map();
+    const { campaignNames, groupNames } = buildHistoryNameSets([...state.campaignGroupsA, ...state.campaignGroupsB]);
+    const monthHistory = matchHistoryForPeriods(
+      state.historyEntriesRaw || [], [[state.rangeA.start, state.rangeA.end], [state.rangeB.start, state.rangeB.end]],
+      campaignNames, groupNames
+    );
+    for (const kind of ["new", "ended"]) {
+      const cards = kind === "new" ? newCards : endedCards;
+      cards.forEach((card, cardIdx) => {
+        const cardNames = new Set([card.campaign, ...card.groups.map(g => g.group)].filter(Boolean));
+        const matched = monthHistory.filter(e => cardNames.has(e.campaign));
+        if (matched.length) settingDiffHistoryByCardKey.set(`${kind}||${cardIdx}`, matched);
+      });
+    }
 
     const selectAllHtml = (kind, count) => count > 5
       ? `<label class="diff-select-all"><input type="checkbox" class="diff-select-all-checkbox" data-kind="${kind}"> 전체 선택</label>` : "";
@@ -2304,6 +2409,7 @@
           isEndedCampaign: fullySelected && !!card.isEndedCampaign,
           groupNames: selectedGroups.map(g => g.group),
           spend: fmtWon(raw.spend), kpis, raw,
+          history: (settingDiffHistoryByCardKey.get(`${kind}||${cardIdx}`) || []).map(fmtHistoryEntryForPrompt),
         });
       });
     }
@@ -3528,6 +3634,11 @@
     DATA_CURRENT = {
       groups: [].concat(...checked.map(t => (DATA.tabs[t] || {}).groups || [])),
       promoGroups: [].concat(...checked.map(t => (DATA.tabs[t] || {}).promoGroups || [])),
+      // day-level, media/campaign/group only (no goal/brand/promo split) - groups
+      // above never carries 캠페인이름/광고그룹 이름, so the 세팅 변경 히스토리 매칭
+      // (기존 기능에 연결) needs this separately, same source monthly's setting-diff
+      // feature already reads via aggregateCampaignGroupsByDateRange.
+      campaignGroups: [].concat(...checked.map(t => (DATA.tabs[t] || {}).campaignGroups || [])),
     };
     const dates = DATA_CURRENT.groups.map(g => g.date).filter(Boolean).sort();
     const minDate = dates[0] || "";
@@ -3615,7 +3726,7 @@
     }
   }
 
-  function runAnalysis() {
+  async function runAnalysis() {
     const checkedTabs = getCheckedTabs();
     if (!checkedTabs.length) { alert("분석 탭을 하나 이상 선택하세요."); return; }
     const startA = dateAStart.value, endA = dateAEnd.value;
@@ -3689,9 +3800,19 @@
     document.getElementById("copyBtn").disabled = false;
     document.getElementById("qaToggleBtn").disabled = false;
 
+    // 세팅 변경 히스토리(수동 기록 시트, 기존 AI 코멘트 기능에 연결) - A/B 두 기간 중
+    // 어느 쪽이든 걸치는 항목을 매체/캠페인·그룹/기획전 기준으로 매칭해 코멘트 근거로 얹는다.
+    const historyEntriesRaw = await fetchHistoryEntries();
+    const { campaignNames, groupNames } = buildHistoryNameSets(DATA_CURRENT.campaignGroups);
+    const weeklyPromoNames = new Set(DATA_CURRENT.groups.map(g => g.promo).filter(Boolean));
+    const matchedHistory = matchHistoryForPeriods(
+      historyEntriesRaw, [[startA, endA], [startB, endB]], campaignNames, groupNames, weeklyPromoNames
+    ).map(fmtHistoryEntryForPrompt);
+
     requestAIComments({
       weekA: weekALabel, weekB: weekBLabel,
       note: (weekNoteEl && weekNoteEl.value.trim()) || "",
+      history: matchedHistory,
       매출: rev.promptData, 신규가입: signup.promptData, 앱설치: app.promptData, 트래픽: traffic.promptData,
     });
   }
