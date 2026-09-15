@@ -782,12 +782,16 @@
       const naAll = UNSUPPORTED_FP_SU_MEDIA.includes(media);
       const mainHtml = layout.main.map(key => mediaCardMainHtml(key, a, b, naAll)).join("");
       const subHtml = layout.sub.map(key => mediaCardSubHtml(key, a, b, naAll)).join("");
+      // 광고비는 어느 goal의 main/sub 레이아웃에도 없으니(위 레이아웃들은 성과 지표
+      // 위주) 매체 카드 맨 아래에 고정으로 한 줄 추가한다 - "neutral"이라 up=좋음/
+      // down=나쁨 색칠 없이 방향 화살표만 중립색으로 표시된다(METRIC_GOOD_DIRECTION).
+      const spendHtml = mediaSubRowHtml("광고비", a.spend, b.spend, fmtWonAbbrev, { metricKey: "spend" });
 
       return `<div class="media-card">
         <div class="m-name">${esc(media)}</div>
         <div class="m-main-grid">${mainHtml}</div>
         <hr>
-        ${subHtml}
+        ${subHtml}${spendHtml}
       </div>`;
     }).join("");
 
@@ -873,7 +877,7 @@
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { roasA, roasB, gmvA, gmvB, fpB, suB },
+      kpiTiles: { roasA, roasB, gmvA, gmvB, fpB, suB, spendA, spendB },
       prompt: {
         spendA, gmvA, roasA, spendB, gmvB, roasB, fpA, fpB, suA, suB, decliners: revDecliners, top3: top3Revenue,
         fpDecliners, suDecliners,
@@ -934,6 +938,7 @@
     <section class="section-card" data-ch="매출">
       <div class="section-title"><span class="tag">매출</span><h3>매출 성과</h3></div>
       <div class="kpis">
+        ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("매출 ROAS (B주)", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
         ${kpiTile("매출(GMV)", fmtWonAbbrev(d.kpiTiles.gmvB), deltaSpan(d.kpiTiles.gmvB, d.kpiTiles.gmvA, "won"))}
         ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB))}
@@ -971,7 +976,7 @@
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { roasA: suRoasA, roasB: suRoasB, gmvA: suGmvA, gmvB: suGmvB, fpB: suFpB, suB: suSuB },
+      kpiTiles: { roasA: suRoasA, roasB: suRoasB, gmvA: suGmvA, gmvB: suGmvB, fpB: suFpB, suB: suSuB, spendA: suSpendA, spendB: suSpendB },
       prompt: {
         spendA: suSpendA, gmvA: suGmvA, roasA: suRoasA, spendB: suSpendB, gmvB: suGmvB, roasB: suRoasB,
         fpA: suFpA, fpB: suFpB, suA: suSuA, suB: suSuB, cppA: suCppA, cppB: suCppB, cpaA: suCpaA, cpaB: suCpaB,
@@ -987,6 +992,7 @@
     <section class="section-card" data-ch="신규가입">
       <div class="section-title"><span class="tag">신규가입</span><h3>신규가입 성과</h3></div>
       <div class="kpis">
+        ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("신규가입 ROAS (B주)", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
         ${kpiTile("매출(GMV)", fmtWonAbbrev(d.kpiTiles.gmvB), deltaSpan(d.kpiTiles.gmvB, d.kpiTiles.gmvA, "won"))}
         ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB))}
@@ -1048,7 +1054,7 @@
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { installA, installB, cpiA, cpiB, roasA, roasB, fpB, suB },
+      kpiTiles: { installA, installB, cpiA, cpiB, roasA, roasB, fpB, suB, spendA, spendB },
       prompt: {
         installA, installB, cpiA, cpiB, spendA, spendB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB,
         mediaBreakdown, unsupportedFpSuMedia, topInstallPromos, topGmvPromos,
@@ -1065,6 +1071,7 @@
       <div class="section-title"><span class="tag">앱설치</span><h3>앱설치 성과</h3></div>
       <p class="scope-note">기획전 단위 비교는 Google(AC) 기준으로만 집계됩니다. ASA는 기획전별 구분 없이 전체 합계(위 KPI)에만 반영됩니다.<br>ASA(Apple Search Ads)는 매체 특성상 첫구매·회원가입 수집이 원천적으로 불가능하고, Google은 수집 가능합니다.</p>
       <div class="kpis">
+        ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("CPI", fmtWon(d.kpiTiles.cpiB), deltaSpan(d.kpiTiles.cpiB, d.kpiTiles.cpiA, "won"))}
         ${kpiTile("앱설치", fmtCount(d.kpiTiles.installB), deltaSpan(d.kpiTiles.installB, d.kpiTiles.installA, "count"))}
         ${kpiTile("ROAS", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
@@ -1109,7 +1116,7 @@
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { ctrA, ctrB, cpcA, cpcB, roasA, roasB, fpB, suB, viewsA, viewsB },
+      kpiTiles: { ctrA, ctrB, cpcA, cpcB, roasA, roasB, fpB, suB, viewsA, viewsB, spendA, spendB },
       prompt: {
         ctrA, ctrB, cpcA, cpcB, viewsA, viewsB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB, spendA, spendB,
         mediaList, topMediaByGmv: topMediaByGmv ? topMediaByGmv.media : null,
@@ -1134,6 +1141,7 @@
     <section class="section-card" data-ch="트래픽">
       <div class="section-title"><span class="tag">트래픽</span><h3>트래픽 성과</h3></div>
       <div class="kpis">
+        ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("CTR", fmtPct2(d.kpiTiles.ctrB), deltaSpan(d.kpiTiles.ctrB, d.kpiTiles.ctrA, "pp"))}
         ${kpiTile("CPC", fmtWon(d.kpiTiles.cpcB), deltaSpan(d.kpiTiles.cpcB, d.kpiTiles.cpcA, "won"))}
         ${kpiTile("조회수", fmtNum(d.kpiTiles.viewsB), deltaSpan(d.kpiTiles.viewsB, d.kpiTiles.viewsA, "count"))}
