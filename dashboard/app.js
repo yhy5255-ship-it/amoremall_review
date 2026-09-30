@@ -56,11 +56,13 @@
   const sum = (arr, field) => arr.reduce((a, g) => a + (g[field] || 0), 0);
   const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  function deltaSpan(curr, prev, unit) {
+  // ppDecimals: "pp" 단위일 때만 적용 - CTR처럼 한 자릿수대 %값은 정수로 반올림하면
+  // 실제 변화(예: +0.03%p)가 "+0%p"로 사라진다 - fmtPP 자체의 decimals 인자 그대로 통과.
+  function deltaSpan(curr, prev, unit, ppDecimals) {
     const d = curr - prev;
     const cls = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
     const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
-    return `<span class="delta ${cls}">${arrow} ${unit === "pp" ? fmtPP(d) : unit === "won" ? (d >= 0 ? "+" : "") + fmtWonAbbrev(d) : (d >= 0 ? "+" : "") + fmtNum(d)}</span>`;
+    return `<span class="delta ${cls}">${arrow} ${unit === "pp" ? fmtPP(d, ppDecimals) : unit === "won" ? (d >= 0 ? "+" : "") + fmtWonAbbrev(d) : (d >= 0 ? "+" : "") + fmtNum(d)}</span>`;
   }
 
   // ---------- grouping helpers ----------
@@ -1142,7 +1144,7 @@
       <div class="section-title"><span class="tag">트래픽</span><h3>트래픽 성과</h3></div>
       <div class="kpis">
         ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
-        ${kpiTile("CTR", fmtPct2(d.kpiTiles.ctrB), deltaSpan(d.kpiTiles.ctrB, d.kpiTiles.ctrA, "pp"))}
+        ${kpiTile("CTR", fmtPct2(d.kpiTiles.ctrB), deltaSpan(d.kpiTiles.ctrB, d.kpiTiles.ctrA, "pp", 2))}
         ${kpiTile("CPC", fmtWon(d.kpiTiles.cpcB), deltaSpan(d.kpiTiles.cpcB, d.kpiTiles.cpcA, "won"))}
         ${kpiTile("조회수", fmtNum(d.kpiTiles.viewsB), deltaSpan(d.kpiTiles.viewsB, d.kpiTiles.viewsA, "count"))}
         ${kpiTile("ROAS", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
