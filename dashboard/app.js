@@ -855,26 +855,32 @@
     const fpA = sum(revA, "firstPurchase"), fpB = sum(revB, "firstPurchase");
     const suA = sum(revA, "signup"), suB = sum(revB, "signup");
 
-    const revDecliners = decliners(revA, revB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    // KPF has its own subsection (kept fully deterministic, see buildKpfLead) - a KPF
+    // send is typically a one-off spike-then-drop, so leaving it in would make it
+    // dominate "매출/첫구매/회원가입 하락 요인" purely from its own send cadence,
+    // not a real trend. Excluded up front so every decliner/top-N calc below (and
+    // the AI prompt that reads them) never re-surfaces it.
+    const revANoKpf = revA.filter(g => g.channel !== "KPF");
+    const revBNoKpf = revB.filter(g => g.channel !== "KPF");
+
+    const revDecliners = decliners(revANoKpf, revBNoKpf, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     // GMV 기준 decliners만으로는 "첫구매/회원가입" 리드가 근거로 쓸 데이터가 없어서, 그
     // 지표가 실제로 하락한 이유를 AI가 알 방법이 없었다 (예: 캠페인 종료로 첫구매/회원가입이
     // 크게 빠졌는데 GMV decliners엔 안 잡히는 경우) - 지표별로 따로 계산해서 넘긴다.
-    const fpDecliners = decliners(revA, revB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
-    const suDecliners = decliners(revA, revB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const fpDecliners = decliners(revANoKpf, revBNoKpf, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    const suDecliners = decliners(revANoKpf, revBNoKpf, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
 
-    // KPF has its own subsection (kept fully deterministic, see buildKpfLead), so it's
-    // excluded from the general promo pool used for both the table and the AI prompt.
-    const detailPoolB = groupByPromo(revB.filter(g => g.channel !== "KPF"));
-    const detailPoolA = groupByPromo(revA.filter(g => g.channel !== "KPF"));
+    const detailPoolB = groupByPromo(revBNoKpf);
+    const detailPoolA = groupByPromo(revANoKpf);
     const top3Revenue = topByGmv(detailPoolB, 3).map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvB) }));
 
     const isEvergreen = g => g.brand === REVENUE_EVERGREEN_PROMO.brand && g.promo === REVENUE_EVERGREEN_PROMO.promo;
-    const revAExclEvergreen = revA.filter(g => !isEvergreen(g));
-    const revBExclEvergreen = revB.filter(g => !isEvergreen(g));
+    const revAExclEvergreen = revANoKpf.filter(g => !isEvergreen(g));
+    const revBExclEvergreen = revBNoKpf.filter(g => !isEvergreen(g));
     const gmvAExclEvergreen = sum(revAExclEvergreen, "gmv"), gmvBExclEvergreen = sum(revBExclEvergreen, "gmv");
     const gmvDeltaPctExclEvergreen = gmvAExclEvergreen > 0 ? ((gmvBExclEvergreen - gmvAExclEvergreen) / gmvAExclEvergreen * 100) : null;
     const declinersExclEvergreen = decliners(revAExclEvergreen, revBExclEvergreen, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
-    const top3ExclEvergreen = topByGmv(groupByPromo(revBExclEvergreen.filter(g => g.channel !== "KPF")), 3)
+    const top3ExclEvergreen = topByGmv(groupByPromo(revBExclEvergreen), 3)
       .map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvBExclEvergreen) }));
 
     return {
@@ -925,10 +931,19 @@
       title: "매출_KPF 상세성과",
       // AI를 거치지 않는 규칙 기반 리드이므로 basis는 항상 "data" 고정.
       details: kpfHi.map(p => {
-        const dateLabel = p.rangeStart === p.rangeEnd ? fmtDate(p.rangeStart) : `${fmtDate(p.rangeStart)}~${fmtDate(p.rangeEnd)}`;
         const sentThisMonth = (p.promoStart || "").slice(0, 7) === yearMonth;
-        const sentNote = sentThisMonth ? "" : ` (발송일 ${fmtDate(p.promoStart)})`;
-        return { text: `${dateLabel} [${p.brand} · ${p.promo}] 구매 ${fmtCount(p.purchaseConv)}, 매출 ${fmtWonAbbrev(p.gmv)}, ROAS ${fmtPct(roas(p.gmv, p.spend))} 기록${sentNote}`, basis: "data" };
+        const stats = `구매 ${fmtCount(p.purchaseConv)}, 매출 ${fmtWonAbbrev(p.gmv)}, ROAS ${fmtPct(roas(p.gmv, p.spend))} 기록`;
+        if (sentThisMonth) {
+          // 이번 달 안에 보낸 신규 발송 - 이달 활동 범위(rangeStart~rangeEnd)를 또
+          // 쓰는 대신 실제 발송일(promoStart) 하나로 명확히 "발송"이라고 밝힌다.
+          return { text: `${fmtDate(p.promoStart)} [${p.brand} · ${p.promo}] 발송, ${stats}`, basis: "data" };
+        }
+        // 이전 달에 이미 보낸, 지금도 전환이 들어오는 운영형 KPF(라이브방송 등) -
+        // 이달 활동 범위를 주 날짜로 쓰고 원래 발송일은 괄호로만 덧붙인다 (이걸 "발송"
+        // 문장으로 바꾸면 이달 신규 실적을 옛 발송일 것처럼 보이게 만드는 문제가
+        // 재발하므로 그대로 유지 - 위 함수 설명 주석 참고).
+        const dateLabel = p.rangeStart === p.rangeEnd ? fmtDate(p.rangeStart) : `${fmtDate(p.rangeStart)}~${fmtDate(p.rangeEnd)}`;
+        return { text: `${dateLabel} [${p.brand} · ${p.promo}] ${stats} (발송일 ${fmtDate(p.promoStart)})`, basis: "data" };
       }),
     };
   }
@@ -975,6 +990,9 @@
     const detailPoolB = groupByPromo(suGB);
     const detailPoolA = groupByPromo(suGA);
     const topSignupPromosB = topByField(detailPoolB, "signup", 3).map(p => ({ brand: p.brand, promo: p.promo, signup: p.signup, sharePct: shareOf(p.signup, suSuB) }));
+    // topSignupPromos만 있으면 "첫구매/신규가입" 리드가 신규가입 견인 기획전만 언급하고
+    // 첫구매 견인 기획전은 근거가 없어 언급을 못 했다 - 같은 방식으로 첫구매 기준도 계산.
+    const topFirstPurchasePromosB = topByField(detailPoolB, "firstPurchase", 3).map(p => ({ brand: p.brand, promo: p.promo, firstPurchase: p.firstPurchase, sharePct: shareOf(p.firstPurchase, suFpB) }));
 
     return {
       detailPoolB, detailPoolA,
@@ -982,7 +1000,7 @@
       prompt: {
         spendA: suSpendA, gmvA: suGmvA, roasA: suRoasA, spendB: suSpendB, gmvB: suGmvB, roasB: suRoasB,
         fpA: suFpA, fpB: suFpB, suA: suSuA, suB: suSuB, cppA: suCppA, cppB: suCppB, cpaA: suCpaA, cpaB: suCpaB,
-        gmvDecliners, fpDecliners, suDecliners, topSignupPromos: topSignupPromosB,
+        gmvDecliners, fpDecliners, suDecliners, topSignupPromos: topSignupPromosB, topFirstPurchasePromos: topFirstPurchasePromosB,
       },
     };
   }

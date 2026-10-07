@@ -118,7 +118,7 @@ const SYSTEM_PROMPT = `당신은 이커머스 퍼포먼스 마케팅 분석가�
 - 첫구매(fpA/fpB)와 신규가입(suA/suB) 각각 금주 발생 수 및 전주 대비 증감
 - 증감의 원인은 fpDecliners(첫구매 기준 하락 기획전)와 suDecliners(회원가입 기준 하락 기획전)를 근거로 짚어주세요 (gmvDecliners는 매출 기준이라 첫구매·회원가입 하락 원인과 다를 수 있으니 반드시 fpDecliners/suDecliners를 확인). 마땅한 후보가 없으면 원칙 3에 따라 "원인 불명, 확인 필요"라고 쓰세요.
 - 전주 대비 금주 첫구매 단가(cppA/cppB) 증감액 및 회원가입 단가(cpaA/cpaB) 증감액
-- topSignupPromos에 있는 기획전이 신규모객을 리드했는지 언급 (브랜드+기획전명 함께)
+- topFirstPurchasePromos에 있는 기획전이 첫구매를, topSignupPromos에 있는 기획전이 신규모객(회원가입)을 각각 리드했는지 반드시 둘 다 언급하세요 (브랜드+기획전명 함께) - 첫구매 쪽을 빠뜨리지 마세요
 
 ### 앱설치
 "앱설치" 리드:
