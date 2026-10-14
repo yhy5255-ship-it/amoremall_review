@@ -58,11 +58,18 @@
 
   // ppDecimals: "pp" 단위일 때만 적용 - CTR처럼 한 자릿수대 %값은 정수로 반올림하면
   // 실제 변화(예: +0.03%p)가 "+0%p"로 사라진다 - fmtPP 자체의 decimals 인자 그대로 통과.
+  // "pp"가 아닌 단위(원/건수)는 절대 증감액 뒤에 상대 증감율(%)도 괄호로 덧붙인다 -
+  // 매체 카드(mediaSubRowHtml 등)가 이미 쓰는 "A → B (+N%)" 관례와 동일하게 맞춘 것.
   function deltaSpan(curr, prev, unit, ppDecimals) {
     const d = curr - prev;
     const cls = d > 0.05 ? "up" : d < -0.05 ? "down" : "flat";
     const arrow = d > 0.05 ? "▲" : d < -0.05 ? "▼" : "－";
-    return `<span class="delta ${cls}">${arrow} ${unit === "pp" ? fmtPP(d, ppDecimals) : unit === "won" ? (d >= 0 ? "+" : "") + fmtWonAbbrev(d) : (d >= 0 ? "+" : "") + fmtNum(d)}</span>`;
+    if (unit === "pp") return `<span class="delta ${cls}">${arrow} ${fmtPP(d, ppDecimals)}</span>`;
+    const amount = unit === "won" ? (d >= 0 ? "+" : "") + fmtWonAbbrev(d) : (d >= 0 ? "+" : "") + fmtNum(d);
+    let pctText = "";
+    if (prev !== 0) pctText = ` (${d >= 0 ? "+" : ""}${Math.round((d / prev) * 100)}%)`;
+    else if (curr !== 0) pctText = " (신규)";
+    return `<span class="delta ${cls}">${arrow} ${amount}${pctText}</span>`;
   }
 
   // ---------- grouping helpers ----------
@@ -145,6 +152,30 @@
     }
     out.sort((a, b) => a.delta - b.delta);
     return out.slice(0, n);
+  }
+  // decliners()와 달리 ROAS는 프로모션별로 그냥 더할 수 있는 값이 아니다(spend/gmv
+  // 비율) - GMV는 늘었는데 스펜드가 더 빨리 늘어 ROAS만 빠지는 경우(또는 그 반대)를
+  // GMV 기준 decliners/top3로는 설명할 수 없다. 두 기간 모두에 존재하는 프로모션만
+  // 비교한다 - 한쪽에만 있으면 "효율이 변했다"가 아니라 "존재 자체가 바뀐 것"이라
+  // 신규 집행/종료 신호(다른 데이터)의 몫이지 여기 몫이 아니다. 정확한 %p 기준은
+  // 두지 않고(이 세션의 기존 "숫자 기준 없이 모델이 판단" 원칙과 동일) minSpend만
+  // 노이즈 방지용으로 둔다 - 지출이 너무 작은 프로모션의 ROAS는 변동폭이 커도 의미가 없다.
+  function computeRoasShift(groupsA, groupsB, n, minSpend) {
+    minSpend = minSpend || 300000;
+    const A = groupByPromo(groupsA), B = groupByPromo(groupsB);
+    const mapA = new Map(A.map(p => [promoKey(p), p]));
+    const mapB = new Map(B.map(p => [promoKey(p), p]));
+    const shifts = [];
+    for (const [key, pb] of mapB) {
+      const pa = mapA.get(key);
+      if (!pa) continue;
+      if (pa.spend < minSpend || pb.spend < minSpend) continue;
+      const roasA = roas(pa.gmv, pa.spend), roasB = roas(pb.gmv, pb.spend);
+      shifts.push({ promo: pb.promo, brand: pb.brand, status: pb.status, promoEnd: pb.promoEnd, roasA, roasB, deltaPP: roasB - roasA });
+    }
+    const declined = shifts.filter(s => s.deltaPP < 0).sort((a, b) => a.deltaPP - b.deltaPP).slice(0, n);
+    const improved = shifts.filter(s => s.deltaPP > 0).sort((a, b) => b.deltaPP - a.deltaPP).slice(0, n);
+    return { declined, improved };
   }
   // Media-keyed twin of decliners() - some sections (트래픽) reason about media, not
   // promo, so a promo can't be the attribution unit there. Same union-of-keys fix.
@@ -314,7 +345,7 @@
   }
 
   // ---------- detail table ----------
-  const DETAIL_HEAD = `<tr><th>기획전</th><th>상태</th><th>지출(Gross)</th><th>매출(GMV)</th><th>ROAS</th><th>첫구매</th><th>회원가입</th><th>앱설치</th></tr>`;
+  const DETAIL_HEAD = `<tr><th>기획전</th><th>상태</th><th>지출(Gross)</th><th>매출(GMV)</th><th>ROAS</th><th>첫구매</th><th>신규가입</th><th>앱설치</th></tr>`;
   function detailLabel(p) {
     return p.brand ? `${esc(p.brand)} · ${esc(p.promo)}` : esc(p.promo);
   }
@@ -341,7 +372,7 @@
     gmv:     { label: "매출(GMV)",   val: p => p.gmv,           fmt: fmtWonAbbrev, unit: "won" },
     install: { label: "앱설치 수",   val: p => p.install,       fmt: fmtCount },
     fp:      { label: "첫구매 수",   val: p => p.firstPurchase, fmt: fmtCount },
-    su:      { label: "회원가입 수", val: p => p.signup,        fmt: fmtCount },
+    su:      { label: "신규가입 수", val: p => p.signup,        fmt: fmtCount },
   };
   function rankDetail(list, metricKey, n) {
     const val = DETAIL_METRICS[metricKey].val;
@@ -407,8 +438,9 @@
 
       let deltaHtml = "";
       if (r.state === "both") {
-        const deltaPct = r.valA > 0 ? ((r.valB - r.valA) / r.valA * 100) : null;
-        deltaHtml = deltaSpan(r.valB, r.valA, metric.unit) + (deltaPct != null ? ` <span class="cmp-delta-pct">(${deltaPct >= 0 ? "+" : ""}${Math.round(deltaPct)}%)</span>` : "");
+        // deltaSpan now appends its own relative-% automatically (same formula this
+        // used to compute by hand) - no need to add a second one here anymore.
+        deltaHtml = deltaSpan(r.valB, r.valA, metric.unit);
       }
 
       return `<div class="cmp-row">
@@ -672,14 +704,14 @@
     <th colspan="3">성과</th>
     <th colspan="2">설치</th>
     <th colspan="2">첫구매</th>
-    <th colspan="2">회원가입</th>
+    <th colspan="2">신규가입</th>
     <th colspan="3">트래픽</th>
   </tr>
   <tr>
     <th>광고비</th><th>ROAS</th><th>매출</th>
     <th>설치</th><th>CPI</th>
-    <th>첫구매고객수</th><th>첫구매CPA</th>
-    <th>회원가입</th><th>회원가입CPA</th>
+    <th>첫구매고객수</th><th>CAC</th>
+    <th>신규가입</th><th>가입당단가</th>
     <th>클릭</th><th>CPC</th><th>CTR</th>
   </tr>`;
 
@@ -717,9 +749,9 @@
     install:          { label: "설치수",     fmt: fmtCount,     isPct: false },
     cpi:              { label: "CPI",       fmt: fmtWon,       isPct: false },
     firstPurchase:    { label: "첫구매",     fmt: fmtCount,     isPct: false, naRestricted: true },
-    firstPurchaseCpa: { label: "첫구매 CPA", fmt: fmtWon,       isPct: false, naRestricted: true },
-    signup:           { label: "회원가입",   fmt: fmtCount,     isPct: false, naRestricted: true },
-    signupCpa:        { label: "가입 CPA",   fmt: fmtWon,       isPct: false, naRestricted: true },
+    firstPurchaseCpa: { label: "CAC",        fmt: fmtWon,       isPct: false, naRestricted: true },
+    signup:           { label: "신규가입",   fmt: fmtCount,     isPct: false, naRestricted: true },
+    signupCpa:        { label: "가입당단가", fmt: fmtWon,       isPct: false, naRestricted: true },
     click:            { label: "클릭수",     fmt: fmtCount,     isPct: false },
     cpc:              { label: "CPC",       fmt: fmtWon,       isPct: false },
     ctr:              { label: "CTR",       fmt: fmtPct2,      isPct: true, ppDecimals: 2 },
@@ -869,6 +901,9 @@
     // 크게 빠졌는데 GMV decliners엔 안 잡히는 경우) - 지표별로 따로 계산해서 넘긴다.
     const fpDecliners = decliners(revANoKpf, revBNoKpf, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const suDecliners = decliners(revANoKpf, revBNoKpf, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    // GMV는 늘었는데 ROAS는 빠지는(또는 그 반대) 경우 GMV 기준 신호로는 설명이 안 된다 -
+    // ROAS 자체의 방향에 맞는 전용 신호.
+    const roasShift = computeRoasShift(revANoKpf, revBNoKpf, 3);
 
     const detailPoolB = groupByPromo(revBNoKpf);
     const detailPoolA = groupByPromo(revANoKpf);
@@ -877,21 +912,31 @@
     const isEvergreen = g => g.brand === REVENUE_EVERGREEN_PROMO.brand && g.promo === REVENUE_EVERGREEN_PROMO.promo;
     const revAExclEvergreen = revANoKpf.filter(g => !isEvergreen(g));
     const revBExclEvergreen = revBNoKpf.filter(g => !isEvergreen(g));
+    const spendAExclEvergreen = sum(revAExclEvergreen, "spend"), spendBExclEvergreen = sum(revBExclEvergreen, "spend");
     const gmvAExclEvergreen = sum(revAExclEvergreen, "gmv"), gmvBExclEvergreen = sum(revBExclEvergreen, "gmv");
     const gmvDeltaPctExclEvergreen = gmvAExclEvergreen > 0 ? ((gmvBExclEvergreen - gmvAExclEvergreen) / gmvAExclEvergreen * 100) : null;
+    // 매출(GMV)만 다시 계산하고 ROAS는 재계산을 안 하면, "상시성 캠페인 제외 시 매출은
+    // 증가"라는 문장만으로 ROAS도 좋아졌을 거라고 모델이 넘겨짚을 위험이 있다 - 실제
+    // 숫자로 확인할 수 있게 ROAS도 같은 제외 기준으로 다시 계산해서 넘긴다.
+    const roasAExclEvergreen = roas(gmvAExclEvergreen, spendAExclEvergreen), roasBExclEvergreen = roas(gmvBExclEvergreen, spendBExclEvergreen);
+    const roasDeltaPPExclEvergreen = roasBExclEvergreen - roasAExclEvergreen;
     const declinersExclEvergreen = decliners(revAExclEvergreen, revBExclEvergreen, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const top3ExclEvergreen = topByGmv(groupByPromo(revBExclEvergreen), 3)
       .map(p => ({ brand: p.brand, promo: p.promo, gmv: p.gmv, sharePct: shareOf(p.gmv, gmvBExclEvergreen) }));
+    const roasShiftExclEvergreen = computeRoasShift(revAExclEvergreen, revBExclEvergreen, 3);
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { roasA, roasB, gmvA, gmvB, fpB, suB, spendA, spendB },
+      kpiTiles: { roasA, roasB, gmvA, gmvB, fpA, fpB, suA, suB, spendA, spendB },
       prompt: {
         spendA, gmvA, roasA, spendB, gmvB, roasB, fpA, fpB, suA, suB, decliners: revDecliners, top3: top3Revenue,
         fpDecliners, suDecliners,
+        roasDecliners: roasShift.declined, roasImprovers: roasShift.improved,
         evergreenPromo: `${REVENUE_EVERGREEN_PROMO.brand} · ${REVENUE_EVERGREEN_PROMO.promo}`,
         gmvAExclEvergreen, gmvBExclEvergreen, gmvDeltaPctExclEvergreen,
+        roasAExclEvergreen, roasBExclEvergreen, roasDeltaPPExclEvergreen,
         declinersExclEvergreen, top3ExclEvergreen,
+        roasDeclinersExclEvergreen: roasShiftExclEvergreen.declined, roasImproversExclEvergreen: roasShiftExclEvergreen.improved,
       },
     };
   }
@@ -958,8 +1003,8 @@
         ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("매출 ROAS (B주)", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
         ${kpiTile("매출(GMV)", fmtWonAbbrev(d.kpiTiles.gmvB), deltaSpan(d.kpiTiles.gmvB, d.kpiTiles.gmvA, "won"))}
-        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB))}
-        ${kpiTile("회원가입", fmtCount(d.kpiTiles.suB))}
+        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB), deltaSpan(d.kpiTiles.fpB, d.kpiTiles.fpA, "count"))}
+        ${kpiTile("신규가입", fmtCount(d.kpiTiles.suB), deltaSpan(d.kpiTiles.suB, d.kpiTiles.suA, "count"))}
       </div>
       <div class="comment" id="comment-매출">${commentLoadingHtml()}</div>
       ${buildDetailBlock("rev", d.detailPoolB, d.detailPoolA, 10, weekALabel, weekBLabel, ["gmv", "fp", "su"])}
@@ -986,6 +1031,8 @@
     const gmvDecliners = decliners(suGA, suGB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const fpDecliners = decliners(suGA, suGB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const suDecliners = decliners(suGA, suGB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    // GMV는 늘었는데 ROAS는 빠지는(또는 그 반대) 경우 GMV 기준 신호로는 설명이 안 된다.
+    const roasShift = computeRoasShift(suGA, suGB, 3);
 
     const detailPoolB = groupByPromo(suGB);
     const detailPoolA = groupByPromo(suGA);
@@ -996,11 +1043,12 @@
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { roasA: suRoasA, roasB: suRoasB, gmvA: suGmvA, gmvB: suGmvB, fpB: suFpB, suB: suSuB, spendA: suSpendA, spendB: suSpendB },
+      kpiTiles: { roasA: suRoasA, roasB: suRoasB, gmvA: suGmvA, gmvB: suGmvB, fpA: suFpA, fpB: suFpB, suA: suSuA, suB: suSuB, spendA: suSpendA, spendB: suSpendB },
       prompt: {
         spendA: suSpendA, gmvA: suGmvA, roasA: suRoasA, spendB: suSpendB, gmvB: suGmvB, roasB: suRoasB,
         fpA: suFpA, fpB: suFpB, suA: suSuA, suB: suSuB, cppA: suCppA, cppB: suCppB, cpaA: suCpaA, cpaB: suCpaB,
         gmvDecliners, fpDecliners, suDecliners, topSignupPromos: topSignupPromosB, topFirstPurchasePromos: topFirstPurchasePromosB,
+        roasDecliners: roasShift.declined, roasImprovers: roasShift.improved,
       },
     };
   }
@@ -1015,8 +1063,8 @@
         ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("신규가입 ROAS (B주)", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
         ${kpiTile("매출(GMV)", fmtWonAbbrev(d.kpiTiles.gmvB), deltaSpan(d.kpiTiles.gmvB, d.kpiTiles.gmvA, "won"))}
-        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB))}
-        ${kpiTile("회원가입", fmtCount(d.kpiTiles.suB))}
+        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB), deltaSpan(d.kpiTiles.fpB, d.kpiTiles.fpA, "count"))}
+        ${kpiTile("신규가입", fmtCount(d.kpiTiles.suB), deltaSpan(d.kpiTiles.suB, d.kpiTiles.suA, "count"))}
       </div>
       <div class="comment" id="comment-신규가입">${commentLoadingHtml()}</div>
       ${buildDetailBlock("signup", d.detailPoolB, d.detailPoolA, 10, weekALabel, weekBLabel, ["gmv", "fp", "su"])}
@@ -1071,14 +1119,17 @@
     const gmvDecliners = decliners(appPromoA, appPromoB, 3, "gmv").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const fpDecliners = decliners(appPromoA, appPromoB, 3, "firstPurchase").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
     const suDecliners = decliners(appPromoA, appPromoB, 3, "signup").map(d => ({ ...d, ended: isEndedAround(d, weekARange, weekBRange) }));
+    // GMV는 늘었는데 ROAS는 빠지는(또는 그 반대) 경우 GMV 기준 신호로는 설명이 안 된다.
+    const roasShift = computeRoasShift(appPromoA, appPromoB, 3);
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { installA, installB, cpiA, cpiB, roasA, roasB, fpB, suB, spendA, spendB },
+      kpiTiles: { installA, installB, cpiA, cpiB, roasA, roasB, fpA, fpB, suA, suB, spendA, spendB },
       prompt: {
         installA, installB, cpiA, cpiB, spendA, spendB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB,
         mediaBreakdown, unsupportedFpSuMedia, topInstallPromos, topGmvPromos,
         installDecliners, gmvDecliners, fpDecliners, suDecliners,
+        roasDecliners: roasShift.declined, roasImprovers: roasShift.improved,
       },
     };
   }
@@ -1089,13 +1140,14 @@
       html: `
     <section class="section-card" data-ch="앱설치">
       <div class="section-title"><span class="tag">앱설치</span><h3>앱설치 성과</h3></div>
-      <p class="scope-note">기획전 단위 비교는 Google(AC) 기준으로만 집계됩니다. ASA는 기획전별 구분 없이 전체 합계(위 KPI)에만 반영됩니다.<br>ASA(Apple Search Ads)는 매체 특성상 첫구매·회원가입 수집이 원천적으로 불가능하고, Google은 수집 가능합니다.</p>
+      <p class="scope-note">기획전 단위 비교는 Google(AC) 기준으로만 집계됩니다. ASA는 기획전별 구분 없이 전체 합계(위 KPI)에만 반영됩니다.<br>ASA(Apple Search Ads)는 매체 특성상 첫구매·신규가입 수집이 원천적으로 불가능하고, Google은 수집 가능합니다.</p>
       <div class="kpis">
         ${kpiTile("광고비", fmtWonAbbrev(d.kpiTiles.spendB), deltaSpan(d.kpiTiles.spendB, d.kpiTiles.spendA, "won"))}
         ${kpiTile("CPI", fmtWon(d.kpiTiles.cpiB), deltaSpan(d.kpiTiles.cpiB, d.kpiTiles.cpiA, "won"))}
         ${kpiTile("앱설치", fmtCount(d.kpiTiles.installB), deltaSpan(d.kpiTiles.installB, d.kpiTiles.installA, "count"))}
         ${kpiTile("ROAS", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
-        ${kpiTile("첫구매/가입", `${fmtNum(d.kpiTiles.fpB)}/${fmtNum(d.kpiTiles.suB)}`)}
+        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB), deltaSpan(d.kpiTiles.fpB, d.kpiTiles.fpA, "count"))}
+        ${kpiTile("신규가입", fmtCount(d.kpiTiles.suB), deltaSpan(d.kpiTiles.suB, d.kpiTiles.suA, "count"))}
       </div>
       <div class="comment" id="comment-앱설치">${commentLoadingHtml()}</div>
       ${buildDetailBlock("app", d.detailPoolB, d.detailPoolA, 8, weekALabel, weekBLabel, ["gmv", "install", "fp", "su"])}
@@ -1133,14 +1185,17 @@
     const gmvDecliners = decliners(trA, trB, 3, "gmv");
     const fpDecliners = decliners(trA, trB, 3, "firstPurchase");
     const suDecliners = decliners(trA, trB, 3, "signup");
+    // GMV는 늘었는데 ROAS는 빠지는(또는 그 반대) 경우 GMV 기준 신호로는 설명이 안 된다.
+    const roasShift = computeRoasShift(trA, trB, 3);
 
     return {
       detailPoolB, detailPoolA,
-      kpiTiles: { ctrA, ctrB, cpcA, cpcB, roasA, roasB, fpB, suB, viewsA, viewsB, spendA, spendB },
+      kpiTiles: { ctrA, ctrB, cpcA, cpcB, roasA, roasB, fpA, fpB, suA, suB, viewsA, viewsB, spendA, spendB },
       prompt: {
         ctrA, ctrB, cpcA, cpcB, viewsA, viewsB, gmvA, gmvB, roasA, roasB, fpA, fpB, suA, suB, spendA, spendB,
         mediaList, topMediaByGmv: topMediaByGmv ? topMediaByGmv.media : null,
         clickDecliners, gmvDecliners, fpDecliners, suDecliners,
+        roasDecliners: roasShift.declined, roasImprovers: roasShift.improved,
       },
     };
   }
@@ -1166,7 +1221,8 @@
         ${kpiTile("CPC", fmtWon(d.kpiTiles.cpcB), deltaSpan(d.kpiTiles.cpcB, d.kpiTiles.cpcA, "won"))}
         ${kpiTile("조회수", fmtNum(d.kpiTiles.viewsB), deltaSpan(d.kpiTiles.viewsB, d.kpiTiles.viewsA, "count"))}
         ${kpiTile("ROAS", fmtPct(d.kpiTiles.roasB), deltaSpan(d.kpiTiles.roasB, d.kpiTiles.roasA, "pp"))}
-        ${kpiTile("첫구매/가입", `${fmtNum(d.kpiTiles.fpB)}/${fmtNum(d.kpiTiles.suB)}`)}
+        ${kpiTile("첫구매", fmtCount(d.kpiTiles.fpB), deltaSpan(d.kpiTiles.fpB, d.kpiTiles.fpA, "count"))}
+        ${kpiTile("신규가입", fmtCount(d.kpiTiles.suB), deltaSpan(d.kpiTiles.suB, d.kpiTiles.suA, "count"))}
       </div>
       <div class="comment" id="comment-트래픽">${commentLoadingHtml()}</div>
       ${buildDetailBlock("traffic", d.detailPoolB, d.detailPoolA, 8, weekALabel, weekBLabel, ["gmv", "fp", "su"])}
@@ -1738,7 +1794,7 @@
     click: { label: "클릭", fmt: fmtCount, chartType: "area" },
     roas: { label: "ROAS", fmt: (v) => (v == null ? "-" : fmtPct(v)), chartType: "line" },
     firstPurchase: { label: "첫구매", fmt: fmtCount, chartType: "line" },
-    signup: { label: "회원가입", fmt: fmtCount, chartType: "line" },
+    signup: { label: "신규가입", fmt: fmtCount, chartType: "line" },
   };
   const TREND_METRIC_KEYS = ["spend", "click", "roas", "firstPurchase", "signup"];
 
@@ -2472,9 +2528,9 @@
   function settingDiffKpiSet(goal, agg) {
     if (goal === "신규가입") return [
       { label: "첫구매수", value: fmtCount(agg.firstPurchase) },
-      { label: "첫구매CPA", value: agg.firstPurchase > 0 ? fmtWon(agg.spend / agg.firstPurchase) : "-" },
-      { label: "회원가입수", value: fmtCount(agg.signup) },
-      { label: "회원가입CPA", value: agg.signup > 0 ? fmtWon(agg.spend / agg.signup) : "-" },
+      { label: "CAC", value: agg.firstPurchase > 0 ? fmtWon(agg.spend / agg.firstPurchase) : "-" },
+      { label: "신규가입수", value: fmtCount(agg.signup) },
+      { label: "가입당단가", value: agg.signup > 0 ? fmtWon(agg.spend / agg.signup) : "-" },
     ];
     if (goal === "트래픽") return [
       { label: "클릭수", value: fmtCount(agg.click) },
@@ -2843,9 +2899,9 @@
     { key: "cpc", label: "CPC", fmt: fmtWon },
     { key: "cpi", label: "CPI", fmt: fmtWon },
     { key: "firstPurchase", label: "첫구매수", fmt: fmtCount },
-    { key: "firstPurchaseCpa", label: "첫구매CPA", fmt: fmtWon },
-    { key: "signup", label: "회원가입수", fmt: fmtCount },
-    { key: "signupCpa", label: "회원가입CPA", fmt: fmtWon },
+    { key: "firstPurchaseCpa", label: "CAC", fmt: fmtWon },
+    { key: "signup", label: "신규가입수", fmt: fmtCount },
+    { key: "signupCpa", label: "가입당단가", fmt: fmtWon },
   ];
   // Selectable metrics for the media-share donut - "지출" stays the default (matches
   // the section's original behavior) with 6 more added alongside it.
@@ -2853,7 +2909,7 @@
     { key: "spend", label: "지출", fmt: fmtWon },
     { key: "gmv", label: "GMV", fmt: fmtWon },
     { key: "firstPurchase", label: "첫구매수", fmt: fmtCount },
-    { key: "signup", label: "회원가입수", fmt: fmtCount },
+    { key: "signup", label: "신규가입수", fmt: fmtCount },
     { key: "install", label: "앱설치수", fmt: fmtCount },
     { key: "click", label: "클릭수", fmt: fmtCount },
     { key: "impr", label: "노출수", fmt: fmtCount },
@@ -3029,7 +3085,7 @@
     }).filter(Boolean);
     if (!rows.length) return "";
 
-    const head = `<tr><th>기획전</th><th>지출</th><th>GMV</th><th>ROAS</th><th>첫구매수</th><th>첫구매CPA</th><th>회원가입수</th><th>회원가입CPA</th></tr>`;
+    const head = `<tr><th>기획전</th><th>지출</th><th>GMV</th><th>ROAS</th><th>첫구매수</th><th>CAC</th><th>신규가입수</th><th>가입당단가</th></tr>`;
     const bodyRows = rows.map(({ p, totA, totB }) => {
       const roasA = totA.spend > 0 ? roas(totA.gmv, totA.spend) : 0;
       const roasB = totB.spend > 0 ? roas(totB.gmv, totB.spend) : 0;
