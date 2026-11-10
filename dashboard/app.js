@@ -943,17 +943,20 @@
 
   // KPF highlights show every KPF promo with any activity in the calendar MONTH
   // B(금주) falls in (not just that week, and not the full loaded tab pool either -
-  // a multi-tab load would otherwise carry over unrelated months' totals) - that
-  // month's own 구매/매출/ROAS contribution, never AI-generated.
+  // a multi-tab load would otherwise carry over unrelated months' totals) - that's
+  // only used to decide WHICH promos to list, never AI-generated.
   //
   // A KPF promo can be sent in one month (기획전 시작날짜/promoStart) and keep
   // generating conversions for many weeks after (예: 라이브방송형 KPF, 상태 "운영") -
-  // so the date shown is the ACTUAL date range of THIS MONTH's own rows, not the
-  // promo's original send date. Labeling an ongoing promo's fresh this-month
-  // performance with its old send date made it look like stale/leftover data
-  // instead of this month's real activity. A "(발송일 M/D)" note is added only
-  // when the send itself happened in an earlier month, so a genuinely new send
-  // still reads plainly with no redundant annotation.
+  // showing only THIS month's own spend/gmv split for such a promo distorts ROAS
+  // (지출은 발송월에 몰려있고 매출만 그 뒤로 계속 들어오는 식으로 서로 다른 달에
+  // 걸쳐 찍히면 비율이 왜곡된다), so every stat is always summed from the promo's
+  // own promoStart date through the latest loaded data - a true "발송일부터 누적"
+  // total, regardless of which month(s) that spans.
+  //
+  // KPF는 매주 꼬박꼬박 나가는 게 아니라 비정기 발송이라, "전주 대비"(달력 주 단위)는
+  // 이 채널엔 안 맞는 비교다 - 대신 바로 "지난 발송"(기획전명과 무관하게, 로드된 전체
+  // 기간에서 발송일 기준 바로 직전 KPF) 하나와 누적 실적끼리 비교한다.
   function buildKpfLead() {
     const yearMonth = (dateBEnd.value || "").slice(0, 7); // "2026-08"
     if (!yearMonth) return null;
@@ -972,23 +975,61 @@
       return Object.assign(p, { rangeStart: dates[0], rangeEnd: dates[dates.length - 1] });
     }).sort((a, b) => a.rangeStart.localeCompare(b.rangeStart));
     if (!kpfHi.length) return null;
+
+    function sumKpf(brand, promo, start, end) {
+      const rows = DATA_CURRENT.groups.filter(g =>
+        g.channel === "KPF" && g.brand === brand && (g.promo || "(미지정)") === promo &&
+        g.date >= start && g.date <= end
+      );
+      return {
+        spend: sum(rows, "spend"), gmv: sum(rows, "gmv"), purchaseConv: sum(rows, "purchaseConv"),
+        firstPurchase: sum(rows, "firstPurchase"), signup: sum(rows, "signup"),
+      };
+    }
+    const kpfFarEnd = "9999-12-31"; // "누적 전체"는 끝을 안 자르고 로드된 데이터의 끝까지 다 담는다.
+    function cumStatsOf(p) {
+      const since = p.promoStart || p.rangeStart;
+      const cum = sumKpf(p.brand, p.promo, since, kpfFarEnd);
+      const cumRoas = roas(cum.gmv, cum.spend);
+      const cac = cum.firstPurchase > 0 ? cum.spend / cum.firstPurchase : 0;
+      const cpa = cum.signup > 0 ? cum.spend / cum.signup : 0;
+      return { ...cum, roas: cumRoas, cac, cpa };
+    }
+
+    // 로드된 전체 기간의 KPF 발송 이력(이번 달 목록만으론 부족함 - 이번 달 첫 발송의
+    // "지난 발송"은 전달에 있을 수 있다) - 발송일 순으로 정렬해 바로 직전 발송을 찾는다.
+    const allKpfPromos = groupByPromo(DATA_CURRENT.groups.filter(g => g.channel === "KPF" && g.promoStart))
+      .sort((a, b) => (a.promoStart || "").localeCompare(b.promoStart || ""));
+    const keyOf = p => `${p.brand}||${p.promo}`;
+
     return {
       title: "매출_KPF 상세성과",
       // AI를 거치지 않는 규칙 기반 리드이므로 basis는 항상 "data" 고정.
       details: kpfHi.map(p => {
-        const sentThisMonth = (p.promoStart || "").slice(0, 7) === yearMonth;
-        const stats = `구매 ${fmtCount(p.purchaseConv)}, 매출 ${fmtWonAbbrev(p.gmv)}, ROAS ${fmtPct(roas(p.gmv, p.spend))} 기록`;
-        if (sentThisMonth) {
-          // 이번 달 안에 보낸 신규 발송 - 이달 활동 범위(rangeStart~rangeEnd)를 또
-          // 쓰는 대신 실제 발송일(promoStart) 하나로 명확히 "발송"이라고 밝힌다.
-          return { text: `${fmtDate(p.promoStart)} [${p.brand} · ${p.promo}] 발송, ${stats}`, basis: "data" };
+        const since = p.promoStart || p.rangeStart;
+        const cur = cumStatsOf(p);
+        const stats = `구매 ${fmtCount(cur.purchaseConv)}, 매출 ${fmtWonAbbrev(cur.gmv)}, ROAS ${fmtPct(cur.roas)}, `
+          + `첫구매 ${fmtCount(cur.firstPurchase)}, CAC ${cur.cac > 0 ? fmtWon(cur.cac) : "-"}, `
+          + `신규가입 ${fmtCount(cur.signup)}, 가입당단가 ${cur.cpa > 0 ? fmtWon(cur.cpa) : "-"} 기록`;
+
+        const idx = allKpfPromos.findIndex(x => keyOf(x) === keyOf(p));
+        const prev = idx > 0 ? allKpfPromos[idx - 1] : null;
+        let wowText = "";
+        if (prev) {
+          const prevStats = cumStatsOf(prev);
+          const pct = (valA, valB, isPct, metricKey) => deltaMeta(valA, valB, isPct, metricKey).pct || "-";
+          const wow = [
+            `매출 ${pct(prevStats.gmv, cur.gmv, false, "gmv")}`,
+            `ROAS ${pct(prevStats.roas, cur.roas, true, "roas")}`,
+            `첫구매 ${pct(prevStats.firstPurchase, cur.firstPurchase, false, "firstPurchase")}`,
+            `CAC ${pct(prevStats.cac, cur.cac, false, "firstPurchaseCpa")}`,
+            `신규가입 ${pct(prevStats.signup, cur.signup, false, "signup")}`,
+            `가입당단가 ${pct(prevStats.cpa, cur.cpa, false, "signupCpa")}`,
+          ].join(", ");
+          wowText = ` (지난 발송 [${prev.brand} · ${prev.promo}] 대비 ${wow})`;
         }
-        // 이전 달에 이미 보낸, 지금도 전환이 들어오는 운영형 KPF(라이브방송 등) -
-        // 이달 활동 범위를 주 날짜로 쓰고 원래 발송일은 괄호로만 덧붙인다 (이걸 "발송"
-        // 문장으로 바꾸면 이달 신규 실적을 옛 발송일 것처럼 보이게 만드는 문제가
-        // 재발하므로 그대로 유지 - 위 함수 설명 주석 참고).
-        const dateLabel = p.rangeStart === p.rangeEnd ? fmtDate(p.rangeStart) : `${fmtDate(p.rangeStart)}~${fmtDate(p.rangeEnd)}`;
-        return { text: `${dateLabel} [${p.brand} · ${p.promo}] ${stats} (발송일 ${fmtDate(p.promoStart)})`, basis: "data" };
+
+        return { text: `${fmtDate(since)} [${p.brand} · ${p.promo}] 발송, ${stats}${wowText}`, basis: "data" };
       }),
     };
   }
