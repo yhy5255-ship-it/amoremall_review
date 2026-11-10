@@ -1008,9 +1008,7 @@
       details: kpfHi.map(p => {
         const since = p.promoStart || p.rangeStart;
         const cur = cumStatsOf(p);
-        const stats = `구매 ${fmtCount(cur.purchaseConv)}, 매출 ${fmtWonAbbrev(cur.gmv)}, ROAS ${fmtPct(cur.roas)}, `
-          + `첫구매 ${fmtCount(cur.firstPurchase)}, CAC ${cur.cac > 0 ? fmtWon(cur.cac) : "-"}, `
-          + `신규가입 ${fmtCount(cur.signup)}, 가입당단가 ${cur.cpa > 0 ? fmtWon(cur.cpa) : "-"} 기록`;
+        const stats = `구매 ${fmtCount(cur.purchaseConv)}, 매출 ${fmtWonAbbrev(cur.gmv)}, ROAS ${fmtPct(cur.roas)} 기록`;
 
         const idx = allKpfPromos.findIndex(x => keyOf(x) === keyOf(p));
         const prev = idx > 0 ? allKpfPromos[idx - 1] : null;
@@ -1026,7 +1024,7 @@
             `신규가입 ${pct(prevStats.signup, cur.signup, false, "signup")}`,
             `가입당단가 ${pct(prevStats.cpa, cur.cpa, false, "signupCpa")}`,
           ].join(", ");
-          wowText = ` (지난 발송 [${prev.brand} · ${prev.promo}] 대비 ${wow})`;
+          wowText = ` (지난 발송 대비 ${wow})`;
         }
 
         return { text: `${fmtDate(since)} [${p.brand} · ${p.promo}] 발송, ${stats}${wowText}`, basis: "data" };
